@@ -14,7 +14,8 @@ Etikra is an open-source Windows label designer for SUPVAN and KATASYMBOL therma
 - Guarded direct USB backend for known T50, T80, G, TP76, TP80, TP86, and SP650 product IDs.
 - Native Windows BLE discovery, persistent GATT notification transport, and E12 printing through `FEE7/FEC1`.
 - Read-before-print interrogation for model, firmware, status, RFID material metadata, loaded width/height/gap/type, and dots/mm.
-- A **Use loaded media size** action plus a hard pre-print geometry recheck; Bluetooth printing is blocked when the returned material data is incoherent or does not match the design.
+- A **Use loaded media size** action plus a hard pre-print geometry recheck; the E12's `12 mm head × 40 mm feed` reply becomes a conventional `40 × 12 mm` landscape editor canvas.
+- A live 1-bit thermal-dot preview and dashed E12 print-safe guide. Elements crossing the approximately 1 mm boundary are blocked before any print bytes are sent.
 - Printer status/error handling for cover-open, missing/empty labels, ribbon faults, thermal faults, and busy states.
 - Dependency-free executable test harness for barcode, raster, buffer, checksum, model, and LZMA verification.
 
@@ -56,6 +57,8 @@ dotnet run --project Tests\Etikra.Tests.csproj
 4. Start with **Preview / mock printer**. Etikra writes the rendered output to the local mock-print folder.
 5. For direct USB, connect a supported printer, choose **Refresh USB + Bluetooth**, select it, load the correct media, then print. Etikra shows a confirmation before sending protocol bytes.
 6. For E12 Bluetooth, select the discovered printer and review its live configuration. Choose **Use loaded media size**; Etikra queries the printer again and refuses to send raster data if the design and loaded label disagree.
+
+Etikra rotates the landscape editor raster into the printer's feed coordinates and compensates for the E12's reversed printhead-dot order. The editor therefore matches the physical label instead of exposing the printer's portrait wire orientation.
 
 Holding Ctrl while dragging disables the normal 0.5 mm snap. Arrow keys nudge by 0.5 mm; Shift+arrow nudges by 1 mm. Ctrl+D duplicates and Delete removes the selected element.
 

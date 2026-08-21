@@ -41,7 +41,11 @@ internal static class Program
             ("E12 BLE advertisement signature", E12AdvertisementSignature),
             ("E12 BLE command frame", E12CommandFrame),
             ("E12 material layout validation", E12MaterialLayout),
-            ("E12 BLE raster data framing", E12DataFrames)
+            ("E12 BLE raster data framing", E12DataFrames),
+            ("SUPVAN head-axis mirror", PrintheadAxisMirror),
+            ("E12 landscape raster rotation", E12LandscapeRotation),
+            ("E12 direct-thermal ribbon flag", E12RibbonFlag),
+            ("Native monochrome print preview", MonochromePrintPreview)
         };
 
         try
@@ -167,7 +171,7 @@ internal static class Program
                 $"The returned media/resolution imply {printheadDots} dots across, not the live-tested E12 width of 96; no print data was sent.");
         }
 
-        if (material.LabelType > 3 || information.Status.Errors.Count > 0)
+        if (material.LabelType > 3 || information.Status.BlockingErrors(ignoreDirectThermalRibbonEnd: true).Count > 0)
         {
             throw new InvalidOperationException("The returned material type or printer state is not safe for the verified test path; no print data was sent.");
         }
@@ -175,25 +179,25 @@ internal static class Program
         var document = new LabelDocument
         {
             Name = "Etikra Bluetooth test",
-            WidthMm = material.WidthMm,
-            HeightMm = material.HeightMm
+            WidthMm = material.HeightMm,
+            HeightMm = material.WidthMm
         };
         document.Elements.Add(new LabelElement
         {
             Kind = LabelElementKind.Rectangle,
-            XMm = 0.75,
-            YMm = 12,
-            WidthMm = material.WidthMm - 1.5,
-            HeightMm = 16,
+            XMm = 12,
+            YMm = 0.75,
+            WidthMm = 16,
+            HeightMm = material.WidthMm - 1.5,
             StrokeThicknessMm = 0.3
         });
         document.Elements.Add(new LabelElement
         {
             Kind = LabelElementKind.Text,
-            XMm = 1,
-            YMm = 16,
-            WidthMm = material.WidthMm - 2,
-            HeightMm = 8,
+            XMm = 14,
+            YMm = 2,
+            WidthMm = 12,
+            HeightMm = material.WidthMm - 4,
             Content = "ETIKRA",
             FontSizePt = 8,
             Bold = true
@@ -204,7 +208,12 @@ internal static class Program
             Dpi = (int)Math.Round(dotsPerMillimeter * 25.4),
             PrintheadDots = printheadDots
         };
-        var data = SupvanRasterEncoder.Encode(document, profile, density: 4, materialType: material.LabelType);
+        var data = SupvanRasterEncoder.Encode(
+            document,
+            profile,
+            density: 4,
+            materialType: material.LabelType,
+            orientation: SupvanRasterOrientation.RotateCounterClockwise);
         Console.WriteLine($"Printer reports {material.GeometryDescription}, type {material.LabelType}, {dotsPerMillimeter:0.##} dots/mm, firmware counter {material.FirmwareCounter} (meaning unverified). ");
         Console.WriteLine($"Prepared {data.WidthDots} × {data.HeightDots} dots, {data.Compressed.Length} compressed bytes. Sending one ETIKRA test label…");
         var progress = new Progress<string>(Console.WriteLine);
@@ -331,6 +340,66 @@ internal static class Program
         Equal((byte)1, frames[1][10], "second frame index");
         Equal((byte)2, frames[1][11], "second frame total");
         Equal(compressed[500], frames[1][12], "second frame payload");
+    }
+
+    private static void PrintheadAxisMirror()
+    {
+        var leftPixel = new byte[] { 0x80 };
+        var canvas = SupvanRasterEncoder.BuildPrintheadCanvas(leftPixel, 8, 1, 8);
+        Equal((byte)0x80, canvas[0], "source left pixel should map to physical high-dot end");
+
+        var rightPixel = new byte[] { 0x01 };
+        canvas = SupvanRasterEncoder.BuildPrintheadCanvas(rightPixel, 8, 1, 8);
+        Equal((byte)0x01, canvas[0], "source right pixel should map to physical low-dot end");
+    }
+
+    private static void E12LandscapeRotation()
+    {
+        // A pixel at the landscape image's top-left moves to the bottom-left
+        // of the 90-degree counter-clockwise printer input raster.
+        var source = new byte[] { 0x80, 0x00, 0x00 };
+        var rotated = SupvanRasterEncoder.RotateCounterClockwise(source, 2, 3);
+        Equal(2, rotated.Length, "rotated row count");
+        Equal((byte)0x00, rotated[0], "rotated top row");
+        Equal((byte)0x80, rotated[1], "rotated bottom-left pixel");
+
+        var document = new LabelDocument { WidthMm = 40, HeightMm = 12 };
+        var data = SupvanRasterEncoder.Encode(
+            document,
+            PrinterProfiles.E12,
+            4,
+            1,
+            SupvanRasterOrientation.RotateCounterClockwise);
+        Equal(96, data.WidthDots, "rotated E12 head width");
+        Equal(320, data.HeightDots, "rotated E12 feed length");
+    }
+
+    private static void E12RibbonFlag()
+    {
+        var response = new byte[20];
+        response[0] = 0x7E;
+        response[1] = 0x5A;
+        response[2] = 16;
+        response[7] = 0x11;
+        response[14] = 0x20;
+        var status = BlePrinterStatus.Parse(response);
+        Equal(1, status.Errors.Count, "raw ribbon error count");
+        Equal(0, status.BlockingErrors(ignoreDirectThermalRibbonEnd: true).Count, "direct-thermal blocking error count");
+
+        response[16] = 0x08;
+        status = BlePrinterStatus.Parse(response);
+        Equal(1, status.BlockingErrors(ignoreDirectThermalRibbonEnd: true).Count, "cover error must remain blocking");
+    }
+
+    private static void MonochromePrintPreview()
+    {
+        var document = new LabelDocument { WidthMm = 40, HeightMm = 12 };
+        var preview = LabelRenderer.RenderMonochromePreview(document, 203);
+        Equal(320, preview.PixelWidth, "preview pixel width");
+        Equal(96, preview.PixelHeight, "preview pixel height");
+        var pixels = new byte[preview.PixelWidth * preview.PixelHeight];
+        preview.CopyPixels(pixels, preview.PixelWidth, 0);
+        True(pixels.All(value => value == 255), "blank preview should be white");
     }
 
     private static void Equal<T>(T expected, T actual, string label)

@@ -118,6 +118,12 @@
                                 <Button x:Name="UseLoadedMediaButton" Content="Use loaded media size" Margin="0,8,0,0" Click="UseLoadedMedia_Click" Visibility="Collapsed" />
                             </StackPanel>
                         </Border>
+                        <TextBlock Text="1-BIT PRINT PREVIEW" Style="{StaticResource SectionTitle}" Margin="0,13,0,5" />
+                        <Border Background="White" BorderBrush="#CDD1D9" BorderThickness="1" Padding="5" MinHeight="72">
+                            <Image x:Name="PrintRasterPreview" Stretch="Uniform" RenderOptions.BitmapScalingMode="NearestNeighbor" />
+                        </Border>
+                        <TextBlock x:Name="PrintRasterPreviewCaption" Text="Native thermal-dot preview. The dashed canvas guide marks the print-safe area."
+                                   TextWrapping="Wrap" Foreground="{StaticResource MutedBrush}" FontSize="10" Margin="0,4,0,0" />
                         <TextBlock Text="Density" Style="{StaticResource FieldLabel}" Margin="0,13,0,3" />
                         <Grid>
                             <Grid.ColumnDefinitions><ColumnDefinition /><ColumnDefinition Width="35" /></Grid.ColumnDefinitions>

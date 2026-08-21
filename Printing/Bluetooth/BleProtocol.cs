@@ -42,6 +42,16 @@ public sealed record BlePrinterStatus(
         }
     }
 
+    public IReadOnlyList<string> BlockingErrors(bool ignoreDirectThermalRibbonEnd = false)
+    {
+        if (!ignoreDirectThermalRibbonEnd || !RibbonEnd)
+        {
+            return Errors;
+        }
+
+        return Errors.Where(error => error != "ribbon empty").ToArray();
+    }
+
     public static BlePrinterStatus Parse(ReadOnlySpan<byte> response)
     {
         BleProtocol.ValidateResponse(response, BleProtocol.CommandInquiryStatus, 20);
@@ -318,14 +328,14 @@ public sealed class BleProtocol : IAsyncDisposable
     {
         progress?.Report("Checking Bluetooth printer…");
         await SendCommandAsync(CommandCheckDevice, cancellationToken: cancellationToken);
-        await WaitForStatusAsync(status => !status.DeviceBusy && !status.Printing, 60, "ready", cancellationToken);
+        await WaitForStatusAsync(status => !status.DeviceBusy && !status.Printing, 60, "ready", cancellationToken, ignoreDirectThermalRibbonEnd: true);
 
         progress?.Report("Starting Bluetooth print…");
         await SendCommandAsync(CommandStartPrint, cancellationToken: cancellationToken);
         try
         {
-            await WaitForStatusAsync(status => status.Printing, 60, "printing state", cancellationToken);
-            await WaitForStatusAsync(status => !status.BufferFull, 200, "buffer space", cancellationToken, 20);
+            await WaitForStatusAsync(status => status.Printing, 60, "printing state", cancellationToken, ignoreDirectThermalRibbonEnd: true);
+            await WaitForStatusAsync(status => !status.BufferFull, 200, "buffer space", cancellationToken, 20, ignoreDirectThermalRibbonEnd: true);
 
             var frames = BuildDataFrames(data.Compressed);
             progress?.Report($"Sending {data.Compressed.Length:N0} compressed bytes in {frames.Count} BLE frame{(frames.Count == 1 ? string.Empty : "s")}…");
@@ -357,7 +367,7 @@ public sealed class BleProtocol : IAsyncDisposable
             }
 
             progress?.Report("Printing over Bluetooth…");
-            await WaitForStatusAsync(status => !status.DeviceBusy && !status.Printing, 300, "print completion", cancellationToken);
+            await WaitForStatusAsync(status => !status.DeviceBusy && !status.Printing, 300, "print completion", cancellationToken, ignoreDirectThermalRibbonEnd: true);
         }
         catch
         {
@@ -579,15 +589,17 @@ public sealed class BleProtocol : IAsyncDisposable
         int attempts,
         string state,
         CancellationToken cancellationToken,
-        int delayMilliseconds = 100)
+        int delayMilliseconds = 100,
+        bool ignoreDirectThermalRibbonEnd = false)
     {
         for (var attempt = 0; attempt < attempts; attempt++)
         {
             var response = await SendCommandAsync(CommandInquiryStatus, cancellationToken: cancellationToken);
             var status = BlePrinterStatus.Parse(response);
-            if (status.Errors.Count > 0)
+            var blockingErrors = status.BlockingErrors(ignoreDirectThermalRibbonEnd);
+            if (blockingErrors.Count > 0)
             {
-                throw new InvalidOperationException("Printer error: " + string.Join(", ", status.Errors));
+                throw new InvalidOperationException("Printer error: " + string.Join(", ", blockingErrors));
             }
 
             if (predicate(status))

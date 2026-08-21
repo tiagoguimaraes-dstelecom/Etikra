@@ -40,6 +40,35 @@ public static class LabelRenderer
         return stream.ToArray();
     }
 
+    public static BitmapSource RenderMonochromePreview(LabelDocument document, int dpi)
+    {
+        var rendered = Render(document, dpi);
+        var rows = ToOneBitRows(rendered);
+        var stride = rendered.PixelWidth;
+        var pixels = new byte[stride * rendered.PixelHeight];
+        var inputStride = (rendered.PixelWidth + 7) / 8;
+        for (var y = 0; y < rendered.PixelHeight; y++)
+        {
+            for (var x = 0; x < rendered.PixelWidth; x++)
+            {
+                var black = (rows[y * inputStride + x / 8] & (1 << (7 - x % 8))) != 0;
+                pixels[y * stride + x] = black ? (byte)0 : (byte)255;
+            }
+        }
+
+        var preview = BitmapSource.Create(
+            rendered.PixelWidth,
+            rendered.PixelHeight,
+            96,
+            96,
+            PixelFormats.Gray8,
+            null,
+            pixels,
+            stride);
+        preview.Freeze();
+        return preview;
+    }
+
     public static void SavePng(LabelDocument document, string path, int dpi)
     {
         File.WriteAllBytes(path, ToPng(Render(document, dpi)));
@@ -93,7 +122,13 @@ public static class LabelRenderer
                 DrawBarcode(context, element.Content, rect);
                 break;
             case LabelElementKind.Rectangle:
-                context.DrawRectangle(null, new Pen(Brushes.Black, Math.Max(1, element.StrokeThicknessMm * scale)), rect);
+                var rectangleStroke = Math.Max(1, element.StrokeThicknessMm * scale);
+                var rectangleBounds = new Rect(
+                    rect.X + rectangleStroke / 2,
+                    rect.Y + rectangleStroke / 2,
+                    Math.Max(0, rect.Width - rectangleStroke),
+                    Math.Max(0, rect.Height - rectangleStroke));
+                context.DrawRectangle(null, new Pen(Brushes.Black, rectangleStroke), rectangleBounds);
                 break;
             case LabelElementKind.Line:
                 context.DrawLine(

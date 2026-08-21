@@ -66,6 +66,9 @@ public partial class MainWindow : Window
             DesignCanvas.Children.Add(root);
         }
 
+        AddPrintSafeAreaGuide();
+        UpdatePrintRasterPreview();
+
         DocumentStatusText.Text = $"{_document.SizeDescription}  ·  {_document.Elements.Count} element{(_document.Elements.Count == 1 ? string.Empty : "s")}";
     }
 
@@ -145,8 +148,7 @@ public partial class MainWindow : Window
                 return new Border
                 {
                     BorderBrush = Brushes.Black,
-                    BorderThickness = new Thickness(Math.Max(1, element.StrokeThicknessMm * PreviewPixelsPerMm)),
-                    Margin = new Thickness(2)
+                    BorderThickness = new Thickness(Math.Max(1, element.StrokeThicknessMm * PreviewPixelsPerMm))
                 };
 
             case LabelElementKind.Line:
@@ -641,6 +643,7 @@ public partial class MainWindow : Window
         {
             PrinterInformationText.Text = "Select a printer to see its configuration.";
             UseLoadedMediaButton.Visibility = Visibility.Collapsed;
+            UpdatePrintRasterPreview();
             return;
         }
 
@@ -650,6 +653,7 @@ public partial class MainWindow : Window
                 ? "Renders a PNG locally and sends nothing to hardware."
                 : $"{device.ConnectionDescription} · {device.Profile?.Dpi} dpi · {device.Profile?.PrintheadDots} dots";
             UseLoadedMediaButton.Visibility = Visibility.Collapsed;
+            RenderDesign();
             return;
         }
 
@@ -657,11 +661,68 @@ public partial class MainWindow : Window
         var resolution = information.DotsPerMillimeter is double dpmm
             ? $"{dpmm:0.##} dots/mm ({information.Dpi:0.#} dpi)"
             : "resolution not returned";
+        var blockingErrors = information.Status.BlockingErrors(ignoreDirectThermalRibbonEnd: true);
+        var status = blockingErrors.Count > 0
+            ? string.Join(", ", blockingErrors)
+            : information.Status.RibbonEnd
+                ? "ready · direct-thermal ribbon flag ignored"
+                : "ready";
         PrinterInformationText.Text =
             $"Model {information.ProtocolDeviceName ?? "unknown"} · FW {information.FirmwareVersion?.ToString() ?? "?"} · revision raw {information.ProtocolRevisionRawHex ?? "?"}\n" +
-            $"Loaded: {material.GeometryDescription} · type code {material.LabelType}\n" +
-            $"Firmware counter {material.FirmwareCounter?.ToString() ?? "?"} (meaning unverified) · {resolution} · status {(information.Status.Errors.Count == 0 ? "ready" : string.Join(", ", information.Status.Errors))}";
+            $"Loaded: {material.GeometryDescription} · editor {material.HeightMm} × {material.WidthMm} mm · type code {material.LabelType}\n" +
+            $"Firmware counter {material.FirmwareCounter?.ToString() ?? "?"} (meaning unverified) · {resolution} · status {status}";
         UseLoadedMediaButton.Visibility = material.HasPlausibleGeometry ? Visibility.Visible : Visibility.Collapsed;
+        RenderDesign();
+    }
+
+    private void AddPrintSafeAreaGuide()
+    {
+        if (PrinterCombo.SelectedItem is not PrinterDevice { BluetoothInformation.DotsPerMillimeter: double dotsPerMillimeter })
+        {
+            return;
+        }
+
+        var marginMm = SupvanRasterEncoder.PageMarginDots / dotsPerMillimeter;
+        var width = Math.Max(0, (_document.WidthMm - marginMm * 2) * PreviewPixelsPerMm);
+        var height = Math.Max(0, (_document.HeightMm - marginMm * 2) * PreviewPixelsPerMm);
+        var guide = new Rectangle
+        {
+            Width = width,
+            Height = height,
+            Stroke = new SolidColorBrush(Color.FromRgb(224, 126, 40)),
+            StrokeThickness = 1,
+            StrokeDashArray = [4, 3],
+            IsHitTestVisible = false,
+            ToolTip = $"E12 print-safe boundary ({marginMm:0.#} mm inset)"
+        };
+        Canvas.SetLeft(guide, marginMm * PreviewPixelsPerMm);
+        Canvas.SetTop(guide, marginMm * PreviewPixelsPerMm);
+        Panel.SetZIndex(guide, int.MaxValue);
+        DesignCanvas.Children.Add(guide);
+    }
+
+    private void UpdatePrintRasterPreview()
+    {
+        if (!IsInitialized || PrintRasterPreview is null)
+        {
+            return;
+        }
+
+        try
+        {
+            var dpi = PrinterCombo.SelectedItem is PrinterDevice { BluetoothInformation.Dpi: double liveDpi }
+                ? (int)Math.Round(liveDpi)
+                : (PrinterCombo.SelectedItem as PrinterDevice)?.Profile?.Dpi ?? 203;
+            PrintRasterPreview.Source = LabelRenderer.RenderMonochromePreview(_document, dpi);
+            PrintRasterPreviewCaption.Text = PrinterCombo.SelectedItem is PrinterDevice { BluetoothInformation.DotsPerMillimeter: double dotsPerMillimeter }
+                ? $"Exact {dotsPerMillimeter:0.##} dots/mm threshold preview. Keep artwork inside the dashed {SupvanRasterEncoder.PageMarginDots / dotsPerMillimeter:0.#} mm safe area."
+                : $"Monochrome {dpi} dpi threshold preview.";
+        }
+        catch
+        {
+            PrintRasterPreview.Source = null;
+            PrintRasterPreviewCaption.Text = "Raster preview unavailable for the current design.";
+        }
     }
 
     private void UseLoadedMedia_Click(object sender, RoutedEventArgs e)
@@ -671,11 +732,11 @@ public partial class MainWindow : Window
             return;
         }
 
-        _document.WidthMm = material.WidthMm;
         if (material.HeightMm > 0)
         {
-            _document.HeightMm = material.HeightMm;
+            _document.WidthMm = material.HeightMm;
         }
+        _document.HeightMm = material.WidthMm;
 
         foreach (var element in _document.Elements)
         {
@@ -690,7 +751,7 @@ public partial class MainWindow : Window
         MarkDirty();
         RenderDesign();
         UpdateInspector();
-        StatusText.Text = $"Design resized to printer-reported media: {material.GeometryDescription}.";
+        StatusText.Text = $"Design resized to {material.HeightMm} × {material.WidthMm} mm using printer-reported {material.GeometryDescription}.";
     }
 
     private async void Print_Click(object sender, RoutedEventArgs e)

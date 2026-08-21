@@ -151,13 +151,15 @@ material gap         3 mm
 label SN             25004
 ```
 
-The common material payload starts at response byte 22: RFID UID (7 bytes), RFID code (8), label SN (u16), material type (u8), width/height/gap (three u8 values), and a four-byte firmware counter. Geometry is accepted only inside conservative ranges and is queried again immediately before a print. A die-cut design must match returned width and height within 0.1 mm. Continuous media (height zero) requires a width match while document height remains the requested feed length.
+The common material payload starts at response byte 22: RFID UID (7 bytes), RFID code (8), label SN (u16), material type (u8), width/height/gap (three u8 values), and a four-byte firmware counter. Geometry is accepted only inside conservative ranges and is queried again immediately before a print. The protocol's width is the dimension across the head and its height is feed length. Etikra presents those as `feed length × head width`, so this unit's `12 × 40` wire reply becomes a `40 × 12 mm` landscape editor canvas. A die-cut design must match both returned dimensions within 0.1 mm after that mapping. Continuous media requires an across-head match while editor width remains the requested feed length.
 
 The four-byte field after the gap is called `remaining` by public implementations. It changed from 204 to 0 during a single live transfer, which is not a credible remaining-label decrement, so Etikra exposes it only as an unverified firmware counter and never uses it for safety decisions.
 
 ### BLE raster transfer
 
-The E12 path renders at the returned 8 dots/mm (203.2 dpi) and uses the verified 96-dot head width. The printer-returned material type populates the two-bit material field in every 4096-byte print buffer; Etikra does not hard-code that field for Bluetooth jobs.
+The E12 path renders at the returned 8 dots/mm (203.2 dpi) and uses the verified 96-dot head width. Before packing, Etikra rotates the landscape document 90° counter-clockwise into `head width × feed length`, then mirrors the printhead axis. The rotation makes the editor match the physical label; the mirror compensates for the E12's reversed dot numbering, confirmed by the first photographed hardware print. The printer-returned material type populates the two-bit material field in every 4096-byte print buffer; Etikra does not hard-code that field for Bluetooth jobs.
+
+The print-buffer format reserves eight dots at each feed-direction end. On this 8 dots/mm E12 that is a 1 mm boundary. A photographed job with a full-canvas rectangle confirmed that edge artwork is only partially printable, while the rectangle inset by 1 mm printed completely. Etikra now draws that safe boundary on the editor, shows the exact thresholded 1-bit raster separately from the vector design, and rejects elements crossing it before transmission. Rectangle strokes are inset into their declared bounds in both editor and renderer so their geometry is consistent.
 
 Compressed data is split into 500-byte payloads inside checksummed 506-byte packets, then wrapped as 512-byte `7E 5A` frames. Each frame is fragmented into conservative 180-byte GATT writes. The state machine is:
 
@@ -170,5 +172,7 @@ CHECK_DEVICE → idle status → START_PRINT → printing/buffer-ready status
 ```
 
 The live firmware accepted the raster transfer but omitted the `BUF_FULL (10)` echo. Since that opcode is also documented as flow control/output-only, Etikra treats only that missing echo as optional and then uses `INQUIRY_STA` as the completion authority. Any other timeout or decoded printer error triggers a best-effort `STOP_PRINT`.
+
+After the revised hardware print, the E12 asserted `ribbon_end` even though it is a ribbonless direct-thermal device. Etikra preserves that raw flag for diagnostics but ignores it only for the E12 completion gate when it is the sole error. Cover-open, missing/empty labels, read/write faults, low battery, and head-temperature errors remain blocking.
 
 Firmware update and RFID-write opcodes remain deliberately absent.

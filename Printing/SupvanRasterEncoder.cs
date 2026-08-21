@@ -8,6 +8,12 @@ namespace Etikra.Printing;
 
 public sealed record SupvanPrintData(byte[] Compressed, int BufferCount, ushort Speed, int WidthDots, int HeightDots);
 
+public enum SupvanRasterOrientation
+{
+    Native,
+    RotateCounterClockwise
+}
+
 /// <summary>
 /// Converts Etikra's rendered label into the 4096-byte buffers understood by
 /// SUPVAN firmware, then wraps them in an LZMA1-alone stream.
@@ -17,9 +23,14 @@ public static class SupvanRasterEncoder
     private const int PrintBufferSize = 4096;
     private const int HeaderSize = 14;
     private const int MaxImageBytes = 4074;
-    private const int MarginDots = 8;
+    public const int PageMarginDots = 8;
 
-    public static SupvanPrintData Encode(LabelDocument document, PrinterProfile profile, byte density, byte materialType = 1)
+    public static SupvanPrintData Encode(
+        LabelDocument document,
+        PrinterProfile profile,
+        byte density,
+        byte materialType = 1,
+        SupvanRasterOrientation orientation = SupvanRasterOrientation.Native)
     {
         if (materialType > 3)
         {
@@ -29,9 +40,17 @@ public static class SupvanRasterEncoder
         density = Math.Min((byte)15, density);
         var bitmap = LabelRenderer.Render(document, profile.Dpi);
         var rowMajor = LabelRenderer.ToOneBitRows(bitmap);
-        var canvas = BuildPrintheadCanvas(rowMajor, bitmap.PixelWidth, bitmap.PixelHeight, profile.PrintheadDots);
+        var rasterWidth = bitmap.PixelWidth;
+        var rasterHeight = bitmap.PixelHeight;
+        if (orientation == SupvanRasterOrientation.RotateCounterClockwise)
+        {
+            rowMajor = RotateCounterClockwise(rowMajor, rasterWidth, rasterHeight);
+            (rasterWidth, rasterHeight) = (rasterHeight, rasterWidth);
+        }
+
+        var canvas = BuildPrintheadCanvas(rowMajor, rasterWidth, rasterHeight, profile.PrintheadDots);
         var perLineBytes = profile.PrintheadDots / 8;
-        var buffers = BuildPrintBuffers(canvas, perLineBytes, bitmap.PixelHeight, density, materialType);
+        var buffers = BuildPrintBuffers(canvas, perLineBytes, rasterHeight, density, materialType);
         var raw = new byte[buffers.Count * PrintBufferSize];
         for (var i = 0; i < buffers.Count; i++)
         {
@@ -46,7 +65,32 @@ public static class SupvanRasterEncoder
         }
 
         var average = compressed.Length / buffers.Count;
-        return new SupvanPrintData(compressed, buffers.Count, CalculateSpeed(average), bitmap.PixelWidth, bitmap.PixelHeight);
+        return new SupvanPrintData(compressed, buffers.Count, CalculateSpeed(average), rasterWidth, rasterHeight);
+    }
+
+    internal static byte[] RotateCounterClockwise(byte[] rows, int width, int height)
+    {
+        var inputStride = (width + 7) / 8;
+        var outputWidth = height;
+        var outputHeight = width;
+        var outputStride = (outputWidth + 7) / 8;
+        var output = new byte[outputStride * outputHeight];
+        for (var y = 0; y < height; y++)
+        {
+            for (var x = 0; x < width; x++)
+            {
+                if ((rows[y * inputStride + x / 8] & (1 << (7 - x % 8))) == 0)
+                {
+                    continue;
+                }
+
+                var destinationX = y;
+                var destinationY = width - 1 - x;
+                output[destinationY * outputStride + destinationX / 8] |= (byte)(1 << (7 - destinationX % 8));
+            }
+        }
+
+        return output;
     }
 
     internal static byte[] BuildPrintheadCanvas(byte[] rows, int width, int height, int printheadDots)
@@ -67,7 +111,9 @@ public static class SupvanRasterEncoder
                 var sourceSet = (rows[y * inputStride + sourceX / 8] & (1 << (7 - sourceX % 8))) != 0;
                 if (sourceSet)
                 {
-                    var destinationX = destinationOffset + x;
+                    // SUPVAN head dot 0 is physically opposite the editor's X=0.
+                    // This mirror is also present in the public reference rasterizer.
+                    var destinationX = destinationOffset + copyWidth - 1 - x;
                     output[y * outputStride + destinationX / 8] |= (byte)(1 << (destinationX % 8));
                 }
             }
@@ -83,13 +129,13 @@ public static class SupvanRasterEncoder
             throw new ArgumentOutOfRangeException(nameof(perLineBytes));
         }
 
-        if (totalColumns <= MarginDots * 2 || totalColumns > ushort.MaxValue)
+        if (totalColumns <= PageMarginDots * 2 || totalColumns > ushort.MaxValue)
         {
             throw new ArgumentOutOfRangeException(nameof(totalColumns));
         }
 
         var maxColumns = MaxImageBytes / perLineBytes;
-        var imageColumns = totalColumns - MarginDots * 2;
+        var imageColumns = totalColumns - PageMarginDots * 2;
         var result = new List<byte[]>();
         var currentColumn = 0;
         while (currentColumn < imageColumns)
@@ -97,7 +143,7 @@ public static class SupvanRasterEncoder
             var columns = Math.Min(maxColumns, imageColumns - currentColumn);
             var first = currentColumn == 0;
             var last = currentColumn + columns >= imageColumns;
-            var start = (MarginDots + currentColumn) * perLineBytes;
+            var start = (PageMarginDots + currentColumn) * perLineBytes;
             var dataLength = columns * perLineBytes;
             var buffer = BuildPrintBuffer(image.AsSpan(start, dataLength), (byte)perLineBytes, (ushort)columns, first, last, density, materialType);
             result.Add(buffer);
@@ -121,8 +167,8 @@ public static class SupvanRasterEncoder
         buffer[3] = (byte)(((materialType & 0x03) << 6) | (Math.Min((byte)15, density) << 2));
         BitConverter.TryWriteBytes(buffer.AsSpan(4, 2), columns);
         buffer[6] = perLineBytes;
-        BitConverter.TryWriteBytes(buffer.AsSpan(8, 2), (ushort)MarginDots);
-        BitConverter.TryWriteBytes(buffer.AsSpan(10, 2), (ushort)MarginDots);
+        BitConverter.TryWriteBytes(buffer.AsSpan(8, 2), (ushort)PageMarginDots);
+        BitConverter.TryWriteBytes(buffer.AsSpan(10, 2), (ushort)PageMarginDots);
         buffer[12] = Math.Min((byte)15, density);
         image[..Math.Min(image.Length, PrintBufferSize - HeaderSize)].CopyTo(buffer.AsSpan(HeaderSize));
 
