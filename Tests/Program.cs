@@ -48,6 +48,12 @@ internal static class Program
             ("E12 landscape raster rotation", E12LandscapeRotation),
             ("E12 direct-thermal ribbon flag", E12RibbonFlag),
             ("Native monochrome print preview", MonochromePrintPreview),
+            ("Document snapshots preserve element identity", SnapshotIdentity),
+            ("Editor history undo, redo, and save checkpoint", EditorHistoryLifecycle),
+            ("Editor history capacity and redo invalidation", EditorHistoryCapacity),
+            ("Editor viewport fit and zoom bounds", EditorViewportMath),
+            ("Editor numeric validation is culture aware", EditorNumericValidation),
+            ("Element clipboard round trip and paste clamping", ElementClipboardRoundTrip),
             ("Settings persistence excludes media", SettingsPersistence),
             ("Label v1 migration and v2 media requirement", DocumentMediaMigration),
             ("Media compatibility and pristine adaptation", MediaCompatibilityAndAdaptation),
@@ -453,6 +459,98 @@ internal static class Program
         var pixels = new byte[preview.PixelWidth * preview.PixelHeight];
         preview.CopyPixels(pixels, preview.PixelWidth, 0);
         True(pixels.All(value => value == 255), "blank preview should be white");
+    }
+
+    private static void SnapshotIdentity()
+    {
+        var id = Guid.NewGuid();
+        var document = new LabelDocument();
+        document.Elements.Add(new LabelElement { Id = id, Kind = LabelElementKind.Text, FontFamily = "Arial" });
+        var snapshot = DocumentService.CreateSnapshot(document);
+        Equal(id, snapshot.Elements[0].Id, "snapshot element id");
+        Equal("Arial", snapshot.Elements[0].FontFamily, "snapshot font family");
+    }
+
+    private static void EditorHistoryLifecycle()
+    {
+        var document = new LabelDocument { Name = "Saved" };
+        var history = new EditorHistory();
+        history.Reset(EditorSnapshot.Capture(document, null, true, false), markSaved: true);
+        True(!history.IsDirty, "fresh saved history should be clean");
+
+        document.Name = "Edited";
+        history.Push(EditorSnapshot.Capture(document, null, false, false));
+        True(history.CanUndo && history.IsDirty, "edit should enable undo and mark dirty");
+        var selectedId = Guid.NewGuid();
+        history.UpdateCurrentSelection(selectedId);
+        Equal("Saved", history.Undo()!.Document.Name, "undo document");
+        True(!history.IsDirty, "undo to save checkpoint should be clean");
+        var redone = history.Redo()!;
+        Equal("Edited", redone.Document.Name, "redo document");
+        Equal(selectedId, redone.SelectedElementId, "selection-only update should follow the current history state");
+        history.MarkSaved();
+        True(!history.IsDirty, "save should move checkpoint");
+    }
+
+    private static void EditorHistoryCapacity()
+    {
+        var document = new LabelDocument();
+        var history = new EditorHistory(3);
+        history.Reset(EditorSnapshot.Capture(document, null, false, false), markSaved: false);
+        for (var index = 1; index <= 4; index++)
+        {
+            document.Name = $"Edit {index}";
+            history.Push(EditorSnapshot.Capture(document, null, false, false));
+        }
+        Equal(3, history.Count, "bounded history state count");
+        history.Undo();
+        document.Name = "Branched";
+        history.Push(EditorSnapshot.Capture(document, null, false, false));
+        True(!history.CanRedo, "new edit should discard redo states");
+    }
+
+    private static void EditorViewportMath()
+    {
+        Equal(2d, EditorViewport.CalculateFitZoom(880, 380, 400, 150), "fit zoom");
+        Equal(EditorViewport.MinimumZoom, EditorViewport.CalculateFitZoom(10, 10, 400, 150), "minimum fit zoom");
+        Equal(EditorViewport.MaximumZoom, EditorViewport.CalculateFitZoom(4000, 4000, 100, 100), "maximum fit zoom");
+        Equal(1.1d, EditorViewport.Step(1, 1), "zoom in step");
+        Equal(0.9d, EditorViewport.Step(1, -1), "zoom out step");
+    }
+
+    private static void EditorNumericValidation()
+    {
+        var portuguese = System.Globalization.CultureInfo.GetCultureInfo("pt-PT");
+        True(EditorInputValidation.TryParseNumber("12,5", 8, 100, out var comma, out _, portuguese), "Portuguese decimal should parse");
+        Equal(12.5d, comma, "Portuguese decimal value");
+        True(EditorInputValidation.TryParseNumber("12.5", 8, 100, out var dot, out _, portuguese), "invariant decimal should parse");
+        Equal(12.5d, dot, "invariant decimal value");
+        True(!EditorInputValidation.TryParseNumber("wide", 8, 100, out _, out var invalid, portuguese) && invalid is not null, "invalid value should explain error");
+        True(!EditorInputValidation.TryParseNumber("101", 8, 100, out _, out var range, portuguese) && range is not null, "out-of-range value should explain error");
+    }
+
+    private static void ElementClipboardRoundTrip()
+    {
+        var id = Guid.NewGuid();
+        var element = new LabelElement
+        {
+            Id = id,
+            Kind = LabelElementKind.Text,
+            XMm = 39,
+            YMm = 14,
+            WidthMm = 30,
+            HeightMm = 8,
+            Content = "Copied",
+            FontFamily = "Arial"
+        };
+        var payload = LabelElementClipboard.Serialize(element);
+        var pasted = LabelElementClipboard.CreatePastedElement(payload, new LabelDocument { WidthMm = 40, HeightMm = 15 });
+        True(pasted is not null, "clipboard payload should deserialize");
+        True(pasted!.Id != id, "paste should assign a new id");
+        Equal("Copied", pasted.Content, "paste content");
+        Equal("Arial", pasted.FontFamily, "paste font family");
+        True(pasted.XMm + pasted.WidthMm <= 40 && pasted.YMm + pasted.HeightMm <= 15, "paste should clamp into document");
+        True(LabelElementClipboard.CreatePastedElement("not json", new LabelDocument()) is null, "invalid clipboard payload should be ignored");
     }
 
     private static void SettingsPersistence()

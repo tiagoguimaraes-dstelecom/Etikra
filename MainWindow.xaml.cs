@@ -9,6 +9,7 @@ using System.Windows.Input;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using System.Windows.Shapes;
+using System.Windows.Threading;
 using Etikra.Models;
 using Etikra.Printing;
 using Etikra.Printing.Bluetooth;
@@ -18,12 +19,15 @@ namespace Etikra;
 
 public partial class MainWindow : Window
 {
-    private const double PreviewPixelsPerMm = 10;
+    private const double BasePreviewPixelsPerMm = 10;
     private static readonly Brush SelectionBrush = new SolidColorBrush(Color.FromRgb(113, 87, 232));
+    private static readonly Brush SafeAreaBrush = new SolidColorBrush(Color.FromRgb(181, 76, 8));
 
     private readonly PrinterSessionManager _printerSession = new();
     private readonly SettingsService _settingsService = new();
     private readonly CancellationTokenSource _windowLifetime = new();
+    private readonly EditorHistory _history = new();
+    private readonly DispatcherTimer _textEditTimer = new() { Interval = TimeSpan.FromMilliseconds(350) };
     private EtikraSettings _settings = new();
     private LabelDocument? _currentDocument;
     private LabelDocument _document => _currentDocument ?? throw new InvalidOperationException("No label is open.");
@@ -40,10 +44,24 @@ public partial class MainWindow : Window
     private DateTimeOffset? _deactivatedAt;
     private bool _closeConfirmed;
     private bool _isPrinting;
+    private bool _restoringEditorState;
+    private bool _pendingTextEdit;
+    private TextBox? _pendingTextSource;
+    private string? _pendingTextOriginalValue;
+    private double _zoom = 1;
+    private bool _fitMode;
+
+    private double PreviewPixelsPerMm => BasePreviewPixelsPerMm * _zoom;
 
     public MainWindow()
     {
         InitializeComponent();
+        ElementFontFamilyBox.ItemsSource = Fonts.SystemFontFamilies
+            .Select(font => font.Source)
+            .Distinct(StringComparer.CurrentCultureIgnoreCase)
+            .OrderBy(name => name, StringComparer.CurrentCultureIgnoreCase)
+            .ToArray();
+        _textEditTimer.Tick += (_, _) => CommitPendingTextEdit();
         ShowEmptyWorkspace();
         _printerSession.StateChanged += PrinterSession_StateChanged;
         Loaded += MainWindow_Loaded;
@@ -51,24 +69,38 @@ public partial class MainWindow : Window
         Deactivated += (_, _) => _deactivatedAt = DateTimeOffset.Now;
     }
 
-    private void LoadDocumentIntoEditor()
+    private void LoadDocumentIntoEditor(bool resetViewport = false, bool selectProperties = true)
     {
         EmptyWorkspacePanel.Visibility = Visibility.Collapsed;
         CanvasScrollViewer.Visibility = Visibility.Visible;
+        ZoomToolbar.Visibility = Visibility.Visible;
         NoDocumentToolsHint.Visibility = Visibility.Collapsed;
         EditorToolsPanel.Visibility = Visibility.Visible;
+        NoDocumentPropertiesHint.Visibility = Visibility.Collapsed;
+        PropertiesPanel.Visibility = Visibility.Visible;
         SaveButton.IsEnabled = true;
         ExportButton.IsEnabled = true;
         MockPrintButton.IsEnabled = true;
-        _selected = null;
+        _updatingInspector = true;
         DocumentNameBox.Text = _document.Name;
         DocumentWidthBox.Text = FormatNumber(_document.WidthMm);
         DocumentHeightBox.Text = FormatNumber(_document.HeightMm);
+        _updatingInspector = false;
         RenderDesign();
         UpdateInspector();
         UpdateTitle();
         UpdateDocumentMediaBindingText();
         UpdateReadiness();
+        UpdateHistoryButtons();
+        if (selectProperties)
+        {
+            WorkspaceTabs.SelectedItem = PropertiesTab;
+        }
+        if (resetViewport)
+        {
+            _fitMode = true;
+            Dispatcher.BeginInvoke(FitLabelToViewport, DispatcherPriority.Loaded);
+        }
     }
 
     private void ShowEmptyWorkspace()
@@ -81,8 +113,11 @@ public partial class MainWindow : Window
         _documentCreatedFromMedia = false;
         EmptyWorkspacePanel.Visibility = Visibility.Visible;
         CanvasScrollViewer.Visibility = Visibility.Collapsed;
+        ZoomToolbar.Visibility = Visibility.Collapsed;
         NoDocumentToolsHint.Visibility = Visibility.Visible;
         EditorToolsPanel.Visibility = Visibility.Collapsed;
+        NoDocumentPropertiesHint.Visibility = Visibility.Visible;
+        PropertiesPanel.Visibility = Visibility.Collapsed;
         SaveButton.IsEnabled = false;
         ExportButton.IsEnabled = false;
         MockPrintButton.IsEnabled = false;
@@ -92,6 +127,9 @@ public partial class MainWindow : Window
         PrintRasterPreviewCaption.Text = "Create a label to see its thermal-dot preview.";
         DocumentStatusText.Text = "No label";
         Title = "Etikra";
+        UndoButton.IsEnabled = false;
+        RedoButton.IsEnabled = false;
+        WorkspaceTabs.SelectedItem = DeviceTab;
         UpdateInspector();
         UpdateReadiness();
     }
@@ -144,6 +182,8 @@ public partial class MainWindow : Window
 
         if (ReferenceEquals(element, _selected))
         {
+            var resizeStartWidth = element.WidthMm;
+            var resizeStartHeight = element.HeightMm;
             var thumb = new Thumb
             {
                 Width = 11,
@@ -156,10 +196,19 @@ public partial class MainWindow : Window
                 VerticalAlignment = VerticalAlignment.Bottom,
                 Margin = new Thickness(0, 0, -6, -6)
             };
+            thumb.DragStarted += (_, _) =>
+            {
+                CommitPendingTextEdit();
+                resizeStartWidth = element.WidthMm;
+                resizeStartHeight = element.HeightMm;
+            };
             thumb.DragDelta += (_, args) => ResizeElement(root, element, args.HorizontalChange, args.VerticalChange);
             thumb.DragCompleted += (_, _) =>
             {
-                MarkDirty();
+                if (!NearlyEqual(resizeStartWidth, element.WidthMm) || !NearlyEqual(resizeStartHeight, element.HeightMm))
+                {
+                    MarkDirty();
+                }
                 RenderDesign();
             };
             root.Children.Add(thumb);
@@ -271,11 +320,14 @@ public partial class MainWindow : Window
             return;
         }
 
+        CommitPendingTextEdit();
         if (!ReferenceEquals(_selected, element))
         {
             _selected = element;
+            _history.UpdateCurrentSelection(element.Id);
             RenderDesign();
             UpdateInspector();
+            WorkspaceTabs.SelectedItem = PropertiesTab;
             root = DesignCanvas.Children.OfType<Grid>().First(item => ReferenceEquals(item.Tag, element));
         }
 
@@ -312,7 +364,10 @@ public partial class MainWindow : Window
 
         _dragging = false;
         root.ReleaseMouseCapture();
-        MarkDirty();
+        if (!NearlyEqual(_dragStartX, ((LabelElement)root.Tag).XMm) || !NearlyEqual(_dragStartY, ((LabelElement)root.Tag).YMm))
+        {
+            MarkDirty();
+        }
         RenderDesign();
         e.Handled = true;
     }
@@ -331,8 +386,10 @@ public partial class MainWindow : Window
         if (ReferenceEquals(e.OriginalSource, DesignCanvas))
         {
             _selected = null;
+            _history.UpdateCurrentSelection(null);
             RenderDesign();
             UpdateInspector();
+            WorkspaceTabs.SelectedItem = PropertiesTab;
         }
     }
 
@@ -371,7 +428,9 @@ public partial class MainWindow : Window
             _isDirty = false;
             _documentPristine = false;
             _documentCreatedFromMedia = _document.MediaRequirement is not null;
-            LoadDocumentIntoEditor();
+            _selected = null;
+            ResetEditorHistory(markSaved: true);
+            LoadDocumentIntoEditor(resetViewport: true);
             StatusText.Text = $"Opened {System.IO.Path.GetFileName(dialog.FileName)}.";
         }
         catch (Exception exception)
@@ -384,6 +443,7 @@ public partial class MainWindow : Window
 
     private async Task<bool> SaveDocumentAsync()
     {
+        CommitPendingTextEdit();
         if (_currentDocument is null)
         {
             return false;
@@ -410,8 +470,10 @@ public partial class MainWindow : Window
         try
         {
             await DocumentService.SaveAsync(_document, _currentPath);
-            _isDirty = false;
+            _history.MarkSaved();
+            _isDirty = _history.IsDirty;
             UpdateTitle();
+            UpdateHistoryButtons();
             StatusText.Text = $"Saved {System.IO.Path.GetFileName(_currentPath)}.";
             return true;
         }
@@ -455,6 +517,7 @@ public partial class MainWindow : Window
 
     private void AddElement_Click(object sender, RoutedEventArgs e)
     {
+        CommitPendingTextEdit();
         if (sender is not Button { Tag: string tag } || !Enum.TryParse<LabelElementKind>(tag, out var kind))
         {
             return;
@@ -485,6 +548,7 @@ public partial class MainWindow : Window
         MarkDirty();
         RenderDesign();
         UpdateInspector();
+        WorkspaceTabs.SelectedItem = PropertiesTab;
     }
 
     private LabelElement CreateDefaultElement(LabelElementKind kind)
@@ -511,6 +575,7 @@ public partial class MainWindow : Window
 
     private void Duplicate_Click(object sender, RoutedEventArgs e)
     {
+        CommitPendingTextEdit();
         if (_selected is null)
         {
             return;
@@ -524,12 +589,14 @@ public partial class MainWindow : Window
         MarkDirty();
         RenderDesign();
         UpdateInspector();
+        WorkspaceTabs.SelectedItem = PropertiesTab;
     }
 
     private void Delete_Click(object sender, RoutedEventArgs e) => DeleteSelection();
 
     private void DeleteSelection()
     {
+        CommitPendingTextEdit();
         if (_selected is null)
         {
             return;
@@ -544,9 +611,29 @@ public partial class MainWindow : Window
 
     private void DocumentField_LostFocus(object sender, RoutedEventArgs e)
     {
-        _document.Name = string.IsNullOrWhiteSpace(DocumentNameBox.Text) ? "Untitled label" : DocumentNameBox.Text.Trim();
-        if (TryReadNumber(DocumentWidthBox.Text, out var width)) _document.WidthMm = width;
-        if (TryReadNumber(DocumentHeightBox.Text, out var height)) _document.HeightMm = height;
+        if (_updatingInspector || _currentDocument is null)
+        {
+            return;
+        }
+
+        CommitPendingTextEdit();
+        var widthValid = TryValidateNumber(DocumentWidthBox, 8, 100, out var width);
+        var heightValid = TryValidateNumber(DocumentHeightBox, 8, 300, out var height);
+        if (!widthValid || !heightValid)
+        {
+            ShowValidationSummary(DocumentValidationText, "Correct the highlighted label dimensions.");
+            return;
+        }
+
+        HideValidationSummary(DocumentValidationText);
+        var changed = !NearlyEqual(_document.WidthMm, width) || !NearlyEqual(_document.HeightMm, height);
+        if (!changed)
+        {
+            return;
+        }
+
+        _document.WidthMm = width;
+        _document.HeightMm = height;
         if (_document.MediaRequirement is { } requirement &&
             (Math.Abs(_document.HeightMm - requirement.TapeWidthMm) > 0.1 ||
              (requirement.Kind == LabelMediaKind.Fixed &&
@@ -561,12 +648,18 @@ public partial class MainWindow : Window
 
         foreach (var element in _document.Elements)
         {
+            element.WidthMm = Math.Min(element.WidthMm, _document.WidthMm);
+            element.HeightMm = Math.Min(element.HeightMm, _document.HeightMm);
             element.XMm = Math.Min(element.XMm, Math.Max(0, _document.WidthMm - element.WidthMm));
             element.YMm = Math.Min(element.YMm, Math.Max(0, _document.HeightMm - element.HeightMm));
         }
 
         MarkDirty();
         RenderDesign();
+        if (_fitMode)
+        {
+            Dispatcher.BeginInvoke(FitLabelToViewport, DispatcherPriority.Loaded);
+        }
     }
 
     private void ElementField_LostFocus(object sender, RoutedEventArgs e)
@@ -576,14 +669,37 @@ public partial class MainWindow : Window
             return;
         }
 
-        _selected.Content = ElementContentBox.Text;
-        if (TryReadNumber(ElementXBox.Text, out var x)) _selected.XMm = ClampToDocument(x, 0, _document.WidthMm - _selected.WidthMm);
-        if (TryReadNumber(ElementYBox.Text, out var y)) _selected.YMm = ClampToDocument(y, 0, _document.HeightMm - _selected.HeightMm);
-        if (TryReadNumber(ElementWidthBox.Text, out var width)) _selected.WidthMm = Math.Min(width, _document.WidthMm - _selected.XMm);
-        if (TryReadNumber(ElementHeightBox.Text, out var height)) _selected.HeightMm = Math.Min(height, _document.HeightMm - _selected.YMm);
-        if (TryReadNumber(ElementRotationBox.Text, out var rotation)) _selected.Rotation = rotation;
-        if (TryReadNumber(ElementStrokeBox.Text, out var stroke)) _selected.StrokeThicknessMm = stroke;
-        if (TryReadNumber(ElementFontSizeBox.Text, out var fontSize)) _selected.FontSizePt = fontSize;
+        CommitPendingTextEdit();
+        var xValid = TryValidateNumber(ElementXBox, 0, Math.Max(0, _document.WidthMm - _selected.WidthMm), out var x);
+        var yValid = TryValidateNumber(ElementYBox, 0, Math.Max(0, _document.HeightMm - _selected.HeightMm), out var y);
+        var widthValid = TryValidateNumber(ElementWidthBox, 0.5, Math.Max(0.5, _document.WidthMm - _selected.XMm), out var width);
+        var heightValid = TryValidateNumber(ElementHeightBox, 0.5, Math.Max(0.5, _document.HeightMm - _selected.YMm), out var height);
+        var rotationValid = TryValidateNumber(ElementRotationBox, -360, 360, out var rotation);
+        var strokeValid = TryValidateNumber(ElementStrokeBox, 0.1, 5, out var stroke);
+        var fontSizeValid = TryValidateNumber(ElementFontSizeBox, 4, 96, out var fontSize);
+        if (!xValid || !yValid || !widthValid || !heightValid || !rotationValid || !strokeValid || !fontSizeValid)
+        {
+            ShowValidationSummary(ElementValidationText, "Correct the highlighted element values.");
+            return;
+        }
+
+        HideValidationSummary(ElementValidationText);
+        var changed = !NearlyEqual(_selected.XMm, x) || !NearlyEqual(_selected.YMm, y) ||
+                      !NearlyEqual(_selected.WidthMm, width) || !NearlyEqual(_selected.HeightMm, height) ||
+                      !NearlyEqual(_selected.Rotation, rotation) || !NearlyEqual(_selected.StrokeThicknessMm, stroke) ||
+                      !NearlyEqual(_selected.FontSizePt, fontSize);
+        if (!changed)
+        {
+            return;
+        }
+
+        _selected.XMm = x;
+        _selected.YMm = y;
+        _selected.WidthMm = width;
+        _selected.HeightMm = height;
+        _selected.Rotation = rotation;
+        _selected.StrokeThicknessMm = stroke;
+        _selected.FontSizePt = fontSize;
         MarkDirty();
         RenderDesign();
         UpdateInspectorValues();
@@ -596,7 +712,13 @@ public partial class MainWindow : Window
             return;
         }
 
-        _selected.Bold = ElementBoldBox.IsChecked == true;
+        CommitPendingTextEdit();
+        var bold = ElementBoldBox.IsChecked == true;
+        if (_selected.Bold == bold)
+        {
+            return;
+        }
+        _selected.Bold = bold;
         MarkDirty();
         RenderDesign();
     }
@@ -632,11 +754,117 @@ public partial class MainWindow : Window
         ElementRotationBox.Text = FormatNumber(_selected.Rotation);
         ElementStrokeBox.Text = FormatNumber(_selected.StrokeThicknessMm);
         ElementFontSizeBox.Text = FormatNumber(_selected.FontSizePt);
+        ElementFontFamilyBox.SelectedItem = _selected.FontFamily;
         ElementBoldBox.IsChecked = _selected.Bold;
         ContentFieldPanel.Visibility = _selected.Kind is LabelElementKind.Text or LabelElementKind.Barcode ? Visibility.Visible : Visibility.Collapsed;
         FontFieldPanel.Visibility = _selected.Kind == LabelElementKind.Text ? Visibility.Visible : Visibility.Collapsed;
+        FontSizeFieldPanel.Visibility = _selected.Kind == LabelElementKind.Text ? Visibility.Visible : Visibility.Collapsed;
         StrokeFieldPanel.Visibility = _selected.Kind is LabelElementKind.Rectangle or LabelElementKind.Line ? Visibility.Visible : Visibility.Collapsed;
+        ClearValidationError(ElementXBox);
+        ClearValidationError(ElementYBox);
+        ClearValidationError(ElementWidthBox);
+        ClearValidationError(ElementHeightBox);
+        ClearValidationError(ElementRotationBox);
+        ClearValidationError(ElementStrokeBox);
+        ClearValidationError(ElementFontSizeBox);
+        HideValidationSummary(ElementValidationText);
         _updatingInspector = false;
+    }
+
+    private void DocumentName_TextChanged(object sender, TextChangedEventArgs e)
+    {
+        if (_updatingInspector || _restoringEditorState || _currentDocument is null)
+        {
+            return;
+        }
+
+        var name = string.IsNullOrWhiteSpace(DocumentNameBox.Text) ? "Untitled label" : DocumentNameBox.Text;
+        if (_document.Name == name)
+        {
+            return;
+        }
+
+        var original = _document.Name;
+        _document.Name = name;
+        QueueTextEdit(DocumentNameBox, original);
+        UpdateTitle(updateNameField: false);
+    }
+
+    private void ElementContent_TextChanged(object sender, TextChangedEventArgs e)
+    {
+        if (_updatingInspector || _restoringEditorState || _selected is null ||
+            _selected.Kind is not (LabelElementKind.Text or LabelElementKind.Barcode))
+        {
+            return;
+        }
+
+        if (_selected.Content == ElementContentBox.Text)
+        {
+            return;
+        }
+
+        var original = _selected.Content;
+        _selected.Content = ElementContentBox.Text;
+        QueueTextEdit(ElementContentBox, original);
+        RenderDesign();
+    }
+
+    private void ElementFontFamily_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (_updatingInspector || _restoringEditorState || _selected is null ||
+            ElementFontFamilyBox.SelectedItem is not string fontFamily || _selected.FontFamily == fontFamily)
+        {
+            return;
+        }
+
+        CommitPendingTextEdit();
+        _selected.FontFamily = fontFamily;
+        MarkDirty();
+        RenderDesign();
+    }
+
+    private void EditorField_PreviewKeyDown(object sender, KeyEventArgs e)
+    {
+        if (e.Key == Key.Enter)
+        {
+            if (sender is UIElement element)
+            {
+                element.MoveFocus(new TraversalRequest(FocusNavigationDirection.Next));
+            }
+            e.Handled = true;
+        }
+        else if (e.Key == Key.Escape)
+        {
+            RestoreNumericFields();
+            e.Handled = true;
+        }
+    }
+
+    private void TextField_PreviewKeyDown(object sender, KeyEventArgs e)
+    {
+        if (e.Key == Key.Escape && ReferenceEquals(sender, _pendingTextSource))
+        {
+            CancelPendingTextEdit();
+            e.Handled = true;
+        }
+    }
+
+    private void TextField_LostFocus(object sender, RoutedEventArgs e) => CommitPendingTextEdit();
+
+    private void NewLabelField_PreviewKeyDown(object sender, KeyEventArgs e)
+    {
+        if (e.Key == Key.Enter)
+        {
+            CreateCustomLabel_Click(sender, e);
+            e.Handled = true;
+        }
+        else if (e.Key == Key.Escape)
+        {
+            ClearValidationError(NewLabelLengthBox);
+            ClearValidationError(NewLabelWidthBox);
+            HideValidationSummary(NewLabelValidationText);
+            e.Handled = true;
+        }
     }
 
     private async void MainWindow_Loaded(object sender, RoutedEventArgs e)
@@ -699,7 +927,11 @@ public partial class MainWindow : Window
         HandleAutomaticMediaChange();
     }
 
-    private async void FindPrinter_Click(object sender, RoutedEventArgs e) => await ScanForPrintersAsync();
+    private async void FindPrinter_Click(object sender, RoutedEventArgs e)
+    {
+        WorkspaceTabs.SelectedItem = DeviceTab;
+        await ScanForPrintersAsync();
+    }
 
     private async Task ScanForPrintersAsync()
     {
@@ -824,6 +1056,17 @@ public partial class MainWindow : Window
             PrinterConnectionState.Faulted => "Connection problem",
             _ => "Disconnected"
         };
+        var deviceChipText = _printerSession.ConnectionState switch
+        {
+            PrinterConnectionState.Scanning => "Device · Searching",
+            PrinterConnectionState.Connecting => "Device · Connecting",
+            PrinterConnectionState.Reading => "Device · Reading",
+            PrinterConnectionState.Ready => $"Device · {candidate?.DisplayName ?? "Connected"}",
+            PrinterConnectionState.Faulted => "Device · Attention",
+            _ => "Device · Offline"
+        };
+        DeviceStatusButton.Content = deviceChipText;
+        System.Windows.Automation.AutomationProperties.SetName(DeviceStatusButton, $"{deviceChipText}. Open device details.");
         PrinterIdentityText.Text = candidate is null
             ? "No label maker selected."
             : information is null
@@ -893,7 +1136,7 @@ public partial class MainWindow : Window
         {
             var buttonText = buttonMaterial.IsContinuous ? "Use tape width / bind label" : "Use installed media / bind label";
             UseInstalledMediaButton.Content = buttonText;
-            EmptyUseMediaButton.Content = buttonText;
+            EmptyUseMediaButton.Content = buttonMaterial.IsContinuous ? "Create from installed tape" : "Create from installed media";
             EmptyWorkspaceMessage.Text = $"Installed: {buttonMaterial.GeometryDescription}. Create a blank label from it or choose another size.";
         }
         else
@@ -932,8 +1175,11 @@ public partial class MainWindow : Window
             return;
         }
 
+        CommitPendingTextEdit();
         ApplyMediaToDocument(material, preserveContinuousLength: true);
         _documentPristine = true;
+        _documentCreatedFromMedia = true;
+        MarkDirty(markDocumentEdited: false);
         StatusText.Text = "Untouched blank label adapted to the newly installed media.";
     }
 
@@ -985,7 +1231,7 @@ public partial class MainWindow : Window
         {
             Width = width,
             Height = height,
-            Stroke = new SolidColorBrush(Color.FromRgb(224, 126, 40)),
+            Stroke = SafeAreaBrush,
             StrokeThickness = 1,
             StrokeDashArray = [4, 3],
             IsHitTestVisible = false,
@@ -1050,10 +1296,19 @@ public partial class MainWindow : Window
 
     private void UseLoadedMedia_Click(object sender, RoutedEventArgs e)
     {
+        CommitPendingTextEdit();
         if (_printerSession.Media is not { State: MediaReadState.Ready, Material: { } material })
         {
             return;
         }
+
+        if (_currentDocument is null && material.IsContinuous &&
+            !TryValidateNumber(NewLabelLengthBox, 8, 100, out _))
+        {
+            ShowValidationSummary(NewLabelValidationText, "Enter a valid label length before using continuous tape.");
+            return;
+        }
+        HideValidationSummary(NewLabelValidationText);
 
         if (_currentDocument is null)
         {
@@ -1071,7 +1326,9 @@ public partial class MainWindow : Window
             _isDirty = true;
             _documentPristine = true;
             _documentCreatedFromMedia = true;
-            LoadDocumentIntoEditor();
+            _selected = null;
+            ResetEditorHistory(markSaved: false);
+            LoadDocumentIntoEditor(resetViewport: true);
             StatusText.Text = $"Created blank label from {material.GeometryDescription}.";
             return;
         }
@@ -1090,7 +1347,7 @@ public partial class MainWindow : Window
         {
             _document.MediaRequirement = MediaCompatibility.ToRequirement(material);
             _documentCreatedFromMedia = true;
-            MarkDirty();
+            MarkDirty(markDocumentEdited: false);
             UpdateDocumentMediaBindingText();
             StatusText.Text = "Bound the current label to compatible installed media.";
             return;
@@ -1101,6 +1358,7 @@ public partial class MainWindow : Window
             ApplyMediaToDocument(material, preserveContinuousLength: true);
             _documentPristine = true;
             _documentCreatedFromMedia = true;
+            MarkDirty(markDocumentEdited: false);
             StatusText.Text = "Untouched blank label adapted to installed media.";
             return;
         }
@@ -1128,16 +1386,18 @@ public partial class MainWindow : Window
             _currentPath = null;
             _documentPristine = true;
             _documentCreatedFromMedia = true;
+            _selected = null;
+            ResetEditorHistory(markSaved: false);
         }
         else
         {
             ApplyMediaToDocument(material, preserveContinuousLength: true);
             _documentPristine = false;
             _documentCreatedFromMedia = true;
+            MarkDirty(markDocumentEdited: false);
         }
 
-        _isDirty = true;
-        LoadDocumentIntoEditor();
+        LoadDocumentIntoEditor(resetViewport: answer == MessageBoxResult.No);
         StatusText.Text = answer == MessageBoxResult.No
             ? "Created a new blank label for the installed media."
             : "Resized and rebound the current label; review artwork and safe-area warnings.";
@@ -1154,7 +1414,6 @@ public partial class MainWindow : Window
 
         DocumentWidthBox.Text = FormatNumber(_document.WidthMm);
         DocumentHeightBox.Text = FormatNumber(_document.HeightMm);
-        MarkDirty();
         RenderDesign();
         UpdateInspector();
         UpdateDocumentMediaBindingText();
@@ -1162,12 +1421,14 @@ public partial class MainWindow : Window
 
     private async void CreateCustomLabel_Click(object sender, RoutedEventArgs e)
     {
-        if (!TryReadNumber(NewLabelLengthBox.Text, out var length) ||
-            !TryReadNumber(NewLabelWidthBox.Text, out var width))
+        var lengthValid = TryValidateNumber(NewLabelLengthBox, 8, 100, out var length);
+        var widthValid = TryValidateNumber(NewLabelWidthBox, 8, 300, out var width);
+        if (!lengthValid || !widthValid)
         {
-            MessageBox.Show(this, "Enter valid label dimensions in millimetres.", "Custom label", MessageBoxButton.OK, MessageBoxImage.Information);
+            ShowValidationSummary(NewLabelValidationText, "Correct the highlighted label dimensions.");
             return;
         }
+        HideValidationSummary(NewLabelValidationText);
 
         if (!await ConfirmDiscardAsync())
         {
@@ -1179,12 +1440,15 @@ public partial class MainWindow : Window
         _isDirty = true;
         _documentPristine = true;
         _documentCreatedFromMedia = false;
-        LoadDocumentIntoEditor();
+        _selected = null;
+        ResetEditorHistory(markSaved: false);
+        LoadDocumentIntoEditor(resetViewport: true);
         StatusText.Text = "Created an unbound custom-size label.";
     }
 
     private async void Print_Click(object sender, RoutedEventArgs e)
     {
+        CommitPendingTextEdit();
         if (_currentDocument is null || _printerSession.ActivePrinter is not { } printer)
         {
             MessageBox.Show(this, "Create a label and connect a printer first.", "Print label", MessageBoxButton.OK, MessageBoxImage.Information);
@@ -1222,9 +1486,16 @@ public partial class MainWindow : Window
         _isPrinting = true;
         PrintButton.IsEnabled = false;
         RefreshMediaButton.IsEnabled = false;
+        PrintProgressBar.Visibility = Visibility.Visible;
+        PrintProgressText.Text = "Preparing print…";
+        PrintProgressText.Visibility = Visibility.Visible;
         try
         {
-            var progress = new Progress<string>(message => StatusText.Text = message);
+            var progress = new Progress<string>(message =>
+            {
+                StatusText.Text = message;
+                PrintProgressText.Text = message;
+            });
             var printSnapshot = DocumentService.CreateSnapshot(_document);
             var result = await _printerSession.PrintAsync(printSnapshot, (byte)DensitySlider.Value, progress, _windowLifetime.Token);
             StatusText.Text = result;
@@ -1237,12 +1508,15 @@ public partial class MainWindow : Window
         finally
         {
             _isPrinting = false;
+            PrintProgressBar.Visibility = Visibility.Collapsed;
+            PrintProgressText.Visibility = Visibility.Collapsed;
             UpdatePrinterPanels();
         }
     }
 
     private async void MockPrint_Click(object sender, RoutedEventArgs e)
     {
+        CommitPendingTextEdit();
         if (_currentDocument is null)
         {
             return;
@@ -1280,7 +1554,9 @@ public partial class MainWindow : Window
 
     private async void Window_KeyDown(object sender, KeyEventArgs e)
     {
-        if (Keyboard.Modifiers.HasFlag(ModifierKeys.Control))
+        var control = Keyboard.Modifiers.HasFlag(ModifierKeys.Control);
+        var textInputFocused = IsTextInputFocused();
+        if (control)
         {
             switch (e.Key)
             {
@@ -1296,36 +1572,383 @@ public partial class MainWindow : Window
                     New_Click(sender, e);
                     e.Handled = true;
                     return;
-                case Key.D when _selected is not null:
+                case Key.Z when !textInputFocused && Keyboard.Modifiers.HasFlag(ModifierKeys.Shift):
+                    RedoEditor();
+                    e.Handled = true;
+                    return;
+                case Key.Z when !textInputFocused:
+                    UndoEditor();
+                    e.Handled = true;
+                    return;
+                case Key.Y when !textInputFocused:
+                    RedoEditor();
+                    e.Handled = true;
+                    return;
+                case Key.C when !textInputFocused && _selected is not null:
+                    CopySelection();
+                    e.Handled = true;
+                    return;
+                case Key.X when !textInputFocused && _selected is not null:
+                    CutSelection();
+                    e.Handled = true;
+                    return;
+                case Key.V when !textInputFocused && _currentDocument is not null:
+                    PasteSelection();
+                    e.Handled = true;
+                    return;
+                case Key.D when !textInputFocused && _selected is not null:
                     Duplicate_Click(sender, e);
+                    e.Handled = true;
+                    return;
+                case Key.D0 or Key.NumPad0 when !textInputFocused && _currentDocument is not null:
+                    FitLabelToViewport();
+                    e.Handled = true;
+                    return;
+                case Key.D1 or Key.NumPad1 when !textInputFocused && _currentDocument is not null:
+                    SetZoom(1, fitMode: false);
                     e.Handled = true;
                     return;
             }
         }
 
-        if (e.Key is Key.Delete or Key.Back && _selected is not null && !IsTextInputFocused())
+        if (e.Key is Key.Delete or Key.Back && _selected is not null && !textInputFocused)
         {
             DeleteSelection();
             e.Handled = true;
             return;
         }
 
-        if (_selected is not null && e.Key is Key.Left or Key.Right or Key.Up or Key.Down && !IsTextInputFocused())
+        if (_selected is not null && e.Key is Key.Left or Key.Right or Key.Up or Key.Down && !textInputFocused)
         {
+            CommitPendingTextEdit();
             var step = Keyboard.Modifiers.HasFlag(ModifierKeys.Shift) ? 1d : 0.5;
+            var previousX = _selected.XMm;
+            var previousY = _selected.YMm;
             if (e.Key == Key.Left) _selected.XMm = ClampToDocument(_selected.XMm - step, 0, _document.WidthMm - _selected.WidthMm);
             if (e.Key == Key.Right) _selected.XMm = ClampToDocument(_selected.XMm + step, 0, _document.WidthMm - _selected.WidthMm);
             if (e.Key == Key.Up) _selected.YMm = ClampToDocument(_selected.YMm - step, 0, _document.HeightMm - _selected.HeightMm);
             if (e.Key == Key.Down) _selected.YMm = ClampToDocument(_selected.YMm + step, 0, _document.HeightMm - _selected.HeightMm);
-            MarkDirty();
+            if (!NearlyEqual(previousX, _selected.XMm) || !NearlyEqual(previousY, _selected.YMm))
+            {
+                MarkDirty();
+            }
             RenderDesign();
             UpdateInspectorValues();
             e.Handled = true;
         }
     }
 
+    private void Undo_Click(object sender, RoutedEventArgs e) => UndoEditor();
+    private void Redo_Click(object sender, RoutedEventArgs e) => RedoEditor();
+    private void DeviceStatus_Click(object sender, RoutedEventArgs e) => WorkspaceTabs.SelectedItem = DeviceTab;
+    private void ZoomIn_Click(object sender, RoutedEventArgs e) => SetZoom(EditorViewport.Step(_zoom, 1), fitMode: false);
+    private void ZoomOut_Click(object sender, RoutedEventArgs e) => SetZoom(EditorViewport.Step(_zoom, -1), fitMode: false);
+    private void ActualSize_Click(object sender, RoutedEventArgs e) => SetZoom(1, fitMode: false);
+    private void Fit_Click(object sender, RoutedEventArgs e) => FitLabelToViewport();
+
+    private void Window_PreviewMouseWheel(object sender, MouseWheelEventArgs e)
+    {
+        if (_currentDocument is null || !Keyboard.Modifiers.HasFlag(ModifierKeys.Control))
+        {
+            return;
+        }
+
+        SetZoom(EditorViewport.Step(_zoom, e.Delta), fitMode: false);
+        e.Handled = true;
+    }
+
+    private void Window_SizeChanged(object sender, SizeChangedEventArgs e)
+    {
+        if (_fitMode && _currentDocument is not null)
+        {
+            Dispatcher.BeginInvoke(FitLabelToViewport, DispatcherPriority.Loaded);
+        }
+    }
+
+    private void SetZoom(double zoom, bool fitMode)
+    {
+        _fitMode = fitMode;
+        _zoom = EditorViewport.Clamp(zoom);
+        ZoomLevelButton.Content = $"{_zoom:P0}";
+        System.Windows.Automation.AutomationProperties.SetName(ZoomLevelButton, $"Current zoom {_zoom:P0}; reset to 100 percent");
+        if (_currentDocument is not null)
+        {
+            RenderDesign();
+        }
+    }
+
+    private void FitLabelToViewport()
+    {
+        if (_currentDocument is null)
+        {
+            return;
+        }
+
+        var zoom = EditorViewport.CalculateFitZoom(
+            CanvasScrollViewer.ViewportWidth,
+            CanvasScrollViewer.ViewportHeight,
+            _document.WidthMm * BasePreviewPixelsPerMm + 2,
+            _document.HeightMm * BasePreviewPixelsPerMm + 2);
+        SetZoom(zoom, fitMode: true);
+    }
+
+    private void UndoEditor()
+    {
+        CommitPendingTextEdit();
+        if (_history.Undo() is { } snapshot)
+        {
+            ApplyEditorSnapshot(snapshot);
+            StatusText.Text = "Undid the last editor change.";
+        }
+    }
+
+    private void RedoEditor()
+    {
+        CommitPendingTextEdit();
+        if (_history.Redo() is { } snapshot)
+        {
+            ApplyEditorSnapshot(snapshot);
+            StatusText.Text = "Redid the editor change.";
+        }
+    }
+
+    private void ApplyEditorSnapshot(EditorSnapshot snapshot)
+    {
+        _restoringEditorState = true;
+        _currentDocument = snapshot.Document;
+        _documentPristine = snapshot.DocumentPristine;
+        _documentCreatedFromMedia = snapshot.DocumentCreatedFromMedia;
+        _selected = snapshot.SelectedElementId is Guid selectedId
+            ? _document.Elements.FirstOrDefault(element => element.Id == selectedId)
+            : null;
+        _isDirty = _history.IsDirty;
+        LoadDocumentIntoEditor(selectProperties: false);
+        if (_selected is not null)
+        {
+            WorkspaceTabs.SelectedItem = PropertiesTab;
+        }
+        _restoringEditorState = false;
+    }
+
+    private void ResetEditorHistory(bool markSaved)
+    {
+        if (_currentDocument is null)
+        {
+            return;
+        }
+
+        _history.Reset(CaptureEditorSnapshot(), markSaved);
+        _isDirty = _history.IsDirty;
+        UpdateHistoryButtons();
+        UpdateTitle();
+    }
+
+    private EditorSnapshot CaptureEditorSnapshot() => EditorSnapshot.Capture(
+        _document,
+        _selected?.Id,
+        _documentPristine,
+        _documentCreatedFromMedia);
+
+    private void UpdateHistoryButtons()
+    {
+        UndoButton.IsEnabled = _currentDocument is not null && (_history.CanUndo || _pendingTextEdit);
+        RedoButton.IsEnabled = _currentDocument is not null && _history.CanRedo && !_pendingTextEdit;
+    }
+
+    private bool CopySelection()
+    {
+        if (_selected is null)
+        {
+            return false;
+        }
+
+        try
+        {
+            var data = new DataObject();
+            data.SetData(LabelElementClipboard.DataFormat, LabelElementClipboard.Serialize(_selected));
+            Clipboard.SetDataObject(data, true);
+            StatusText.Text = $"Copied {_selected.Kind.ToString().ToLowerInvariant()} element.";
+            return true;
+        }
+        catch (Exception exception)
+        {
+            StatusText.Text = $"Could not copy the element: {exception.Message}";
+            return false;
+        }
+    }
+
+    private void CutSelection()
+    {
+        if (CopySelection())
+        {
+            DeleteSelection();
+        }
+    }
+
+    private void PasteSelection()
+    {
+        CommitPendingTextEdit();
+        try
+        {
+            var payload = Clipboard.GetData(LabelElementClipboard.DataFormat) as string;
+            var pasted = LabelElementClipboard.CreatePastedElement(payload, _document);
+            if (pasted is null)
+            {
+                StatusText.Text = "The clipboard does not contain an Etikra element.";
+                return;
+            }
+
+            _document.Elements.Add(pasted);
+            _selected = pasted;
+            MarkDirty();
+            RenderDesign();
+            UpdateInspector();
+            WorkspaceTabs.SelectedItem = PropertiesTab;
+            StatusText.Text = $"Pasted {pasted.Kind.ToString().ToLowerInvariant()} element.";
+        }
+        catch (Exception exception)
+        {
+            StatusText.Text = $"Could not paste the element: {exception.Message}";
+        }
+    }
+
+    private void QueueTextEdit(TextBox source, string originalValue)
+    {
+        if (_pendingTextEdit && !ReferenceEquals(_pendingTextSource, source))
+        {
+            CommitPendingTextEdit();
+        }
+        if (!_pendingTextEdit)
+        {
+            _pendingTextSource = source;
+            _pendingTextOriginalValue = originalValue;
+        }
+
+        _pendingTextEdit = true;
+        _documentPristine = false;
+        _isDirty = true;
+        _textEditTimer.Stop();
+        _textEditTimer.Start();
+        UpdateHistoryButtons();
+        UpdateDocumentMediaBindingText();
+        UpdateReadiness();
+    }
+
+    private void CommitPendingTextEdit()
+    {
+        _textEditTimer.Stop();
+        if (!_pendingTextEdit || _currentDocument is null)
+        {
+            return;
+        }
+
+        if (ReferenceEquals(_pendingTextSource, DocumentNameBox))
+        {
+            var normalized = string.IsNullOrWhiteSpace(_document.Name) ? "Untitled label" : _document.Name.Trim();
+            _document.Name = normalized;
+            _updatingInspector = true;
+            DocumentNameBox.Text = normalized;
+            _updatingInspector = false;
+        }
+
+        _pendingTextEdit = false;
+        _pendingTextSource = null;
+        _pendingTextOriginalValue = null;
+        if (_history.Count == 0)
+        {
+            _history.Reset(CaptureEditorSnapshot(), markSaved: false);
+        }
+        else
+        {
+            _history.Push(CaptureEditorSnapshot());
+        }
+        _isDirty = _history.IsDirty;
+        UpdateTitle();
+        UpdateHistoryButtons();
+    }
+
+    private void CancelPendingTextEdit()
+    {
+        _textEditTimer.Stop();
+        if (!_pendingTextEdit || _pendingTextSource is null || _pendingTextOriginalValue is null)
+        {
+            return;
+        }
+
+        _updatingInspector = true;
+        if (ReferenceEquals(_pendingTextSource, DocumentNameBox))
+        {
+            _document.Name = _pendingTextOriginalValue;
+            DocumentNameBox.Text = _pendingTextOriginalValue;
+            UpdateTitle(updateNameField: false);
+        }
+        else if (ReferenceEquals(_pendingTextSource, ElementContentBox) && _selected is not null)
+        {
+            _selected.Content = _pendingTextOriginalValue;
+            ElementContentBox.Text = _pendingTextOriginalValue;
+            RenderDesign();
+        }
+        _updatingInspector = false;
+        _pendingTextEdit = false;
+        _pendingTextSource = null;
+        _pendingTextOriginalValue = null;
+        _isDirty = _history.IsDirty;
+        UpdateTitle();
+        UpdateHistoryButtons();
+        UpdateReadiness();
+    }
+
+    private void RestoreNumericFields()
+    {
+        if (_currentDocument is null)
+        {
+            return;
+        }
+
+        _updatingInspector = true;
+        DocumentWidthBox.Text = FormatNumber(_document.WidthMm);
+        DocumentHeightBox.Text = FormatNumber(_document.HeightMm);
+        ClearValidationError(DocumentWidthBox);
+        ClearValidationError(DocumentHeightBox);
+        HideValidationSummary(DocumentValidationText);
+        _updatingInspector = false;
+        if (_selected is not null)
+        {
+            UpdateInspectorValues();
+        }
+    }
+
+    private static bool TryValidateNumber(TextBox textBox, double minimum, double maximum, out double value)
+    {
+        var valid = EditorInputValidation.TryParseNumber(textBox.Text, minimum, maximum, out value, out var error);
+        SetValidationError(textBox, error);
+        return valid;
+    }
+
+    private static void SetValidationError(TextBox textBox, string? error)
+    {
+        textBox.Tag = error is null ? null : "Error";
+        textBox.ToolTip = error;
+        System.Windows.Automation.AutomationProperties.SetHelpText(textBox, error ?? string.Empty);
+    }
+
+    private static void ClearValidationError(TextBox textBox) => SetValidationError(textBox, null);
+
+    private static void ShowValidationSummary(TextBlock textBlock, string message)
+    {
+        textBlock.Text = message;
+        textBlock.Visibility = Visibility.Visible;
+    }
+
+    private static void HideValidationSummary(TextBlock textBlock)
+    {
+        textBlock.Text = string.Empty;
+        textBlock.Visibility = Visibility.Collapsed;
+    }
+
     private async Task<bool> ConfirmDiscardAsync()
     {
+        CommitPendingTextEdit();
         if (_currentDocument is null || !_isDirty)
         {
             return true;
@@ -1340,16 +1963,33 @@ public partial class MainWindow : Window
         };
     }
 
-    private void MarkDirty()
+    private void MarkDirty(bool markDocumentEdited = true)
     {
-        _isDirty = true;
-        _documentPristine = false;
+        if (_restoringEditorState || _currentDocument is null)
+        {
+            return;
+        }
+
+        if (markDocumentEdited)
+        {
+            _documentPristine = false;
+        }
+        if (_history.Count == 0)
+        {
+            _history.Reset(CaptureEditorSnapshot(), markSaved: false);
+        }
+        else
+        {
+            _history.Push(CaptureEditorSnapshot());
+        }
+        _isDirty = _history.IsDirty;
         UpdateTitle();
+        UpdateHistoryButtons();
         UpdateDocumentMediaBindingText();
         UpdateReadiness();
     }
 
-    private void UpdateTitle()
+    private void UpdateTitle(bool updateNameField = true)
     {
         if (_currentDocument is null)
         {
@@ -1358,7 +1998,12 @@ public partial class MainWindow : Window
         }
 
         Title = $"{(_isDirty ? "• " : string.Empty)}{_document.Name} — Etikra";
-        DocumentNameBox.Text = _document.Name;
+        if (updateNameField && !DocumentNameBox.IsKeyboardFocusWithin)
+        {
+            _updatingInspector = true;
+            DocumentNameBox.Text = _document.Name;
+            _updatingInspector = false;
+        }
     }
 
     private async void Window_Closing(object? sender, CancelEventArgs e)
@@ -1385,6 +2030,7 @@ public partial class MainWindow : Window
         double.TryParse(text, NumberStyles.Float, CultureInfo.CurrentCulture, out value) ||
         double.TryParse(text, NumberStyles.Float, CultureInfo.InvariantCulture, out value);
 
+    private static bool NearlyEqual(double left, double right) => Math.Abs(left - right) < 0.0001;
     private static string FormatNumber(double value) => value.ToString("0.##", CultureInfo.CurrentCulture);
     private static double Snap(double value, double step) => Math.Round(value / step) * step;
     private static double ClampToDocument(double value, double min, double max) => Math.Clamp(value, min, Math.Max(min, max));

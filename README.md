@@ -7,6 +7,7 @@ Etikra is an open-source Windows label designer for SUPVAN and KATASYMBOL therma
 ## What works
 
 - Millimetre-based label canvas with drag, resize, keyboard nudging, rotation, and numeric positioning.
+- Fit-to-window and 25–400% canvas zoom, plus bounded undo/redo and element clipboard actions.
 - Text, Code 128-B barcodes, rectangles, lines, and embedded PNG/JPEG/BMP images.
 - `.etikra` JSON project files and 300 DPI PNG export.
 - A true empty-workspace startup: create from freshly read media, choose a custom size, or open an existing label without sample artwork or invented label metadata.
@@ -56,8 +57,8 @@ dotnet run --project Tests\Etikra.Tests.csproj
 
 ## Using Etikra
 
-1. On first launch, use **Find label maker**, continue with a custom size, or open a saved label. Etikra quietly reconnects to the last successful printer on later launches.
-2. Review the separate **Label maker** health and **Installed media** cards. Use the reported media to create/bind a blank label; continuous tape keeps a user-selected length.
+1. On first launch, create from installed media, continue with a custom size, or open a saved label. Printer setup and diagnostics live in the **Device** tab; Etikra quietly reconnects to the last successful printer on later launches.
+2. Review the separate **Label maker** health and **Installed media** cards in **Device**. Use the reported media to create/bind a blank label; continuous tape keeps a user-selected length.
 3. Add elements from the left palette. Drag them on the canvas or edit exact values in the inspector.
 4. Save the editable project as `.etikra`, export a 300 DPI PNG, or use **Save mock PNG** for safe 203 DPI output without hardware.
 5. Review the readiness checklist before physical printing. E12 jobs re-read status and media on the same persistent connection immediately before raster transfer.
@@ -65,7 +66,7 @@ dotnet run --project Tests\Etikra.Tests.csproj
 
 Etikra rotates the landscape editor raster into the printer's feed coordinates and compensates for the E12's reversed printhead-dot order. The editor therefore matches the physical label instead of exposing the printer's portrait wire orientation.
 
-Holding Ctrl while dragging disables the normal 0.5 mm snap. Arrow keys nudge by 0.5 mm; Shift+arrow nudges by 1 mm. Ctrl+D duplicates and Delete removes the selected element.
+Holding Ctrl while dragging disables the normal 0.5 mm snap. Arrow keys nudge by 0.5 mm; Shift+arrow nudges by 1 mm. Ctrl+D duplicates and Delete removes the selected element. Ctrl+Z/Ctrl+Y undo and redo; Ctrl+C/X/V copy, cut, and paste elements. Ctrl+mouse-wheel zooms, Ctrl+0 fits the label, and Ctrl+1 returns to 100%.
 
 ## Protocol foundations
 

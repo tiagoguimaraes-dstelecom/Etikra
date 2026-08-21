@@ -63,6 +63,7 @@ public static class DocumentService
         },
         Elements = new ObservableCollection<LabelElement>(document.Elements.Select(element => new LabelElement
         {
+            Id = element.Id,
             Kind = element.Kind,
             XMm = element.XMm,
             YMm = element.YMm,

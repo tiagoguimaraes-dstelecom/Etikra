@@ -4,197 +4,311 @@
         Title="Etikra" Height="860" Width="1380" MinHeight="720" MinWidth="1120"
         WindowStartupLocation="CenterScreen" Background="#F3F4F7"
         FontFamily="Segoe UI" Foreground="{StaticResource InkBrush}"
-        KeyDown="Window_KeyDown" Closing="Window_Closing">
+        KeyDown="Window_KeyDown" PreviewMouseWheel="Window_PreviewMouseWheel"
+        SizeChanged="Window_SizeChanged" Closing="Window_Closing">
     <Grid>
         <Grid.RowDefinitions>
-            <RowDefinition Height="68" />
+            <RowDefinition Height="66" />
             <RowDefinition Height="*" />
             <RowDefinition Height="32" />
         </Grid.RowDefinitions>
 
-        <Border Grid.Row="0" Background="White" BorderBrush="#E2E5EB" BorderThickness="0,0,0,1">
-            <Grid Margin="20,0">
+        <Border Grid.Row="0" Background="White" BorderBrush="{StaticResource SubtleBorderBrush}" BorderThickness="0,0,0,1">
+            <Grid Margin="18,0">
                 <Grid.ColumnDefinitions>
-                    <ColumnDefinition Width="260" />
+                    <ColumnDefinition Width="190" />
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="Auto" />
                     <ColumnDefinition Width="*" />
                     <ColumnDefinition Width="Auto" />
                 </Grid.ColumnDefinitions>
+
                 <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
                     <Border Width="38" Height="38" CornerRadius="11" Background="{StaticResource AccentBrush}">
                         <TextBlock Text="E" Foreground="White" FontFamily="Segoe UI Semibold" FontSize="22"
                                    HorizontalAlignment="Center" VerticalAlignment="Center" />
                     </Border>
-                    <StackPanel Margin="11,0,0,0" VerticalAlignment="Center">
+                    <StackPanel Margin="10,0,0,0" VerticalAlignment="Center">
                         <TextBlock Text="Etikra" FontFamily="Segoe UI Semibold" FontSize="19" />
-                        <TextBlock Text="Open label studio" Foreground="{StaticResource MutedBrush}" FontSize="11" />
+                        <TextBlock Text="Open label studio" Foreground="{StaticResource MutedBrush}" FontSize="12" />
                     </StackPanel>
                 </StackPanel>
 
-                <StackPanel Grid.Column="1" Orientation="Horizontal" HorizontalAlignment="Center" VerticalAlignment="Center">
-                    <Button Content="New" Margin="0,0,7,0" Click="New_Click" />
-                    <Button Content="Open" Margin="0,0,7,0" Click="Open_Click" />
-                    <Button x:Name="SaveButton" Content="Save" Margin="0,0,7,0" Click="Save_Click" IsEnabled="False" />
-                    <Button x:Name="ExportButton" Content="Export PNG" Margin="0,0,7,0" Click="Export_Click" IsEnabled="False" />
-                    <Button x:Name="MockPrintButton" Content="Save mock PNG" Click="MockPrint_Click" IsEnabled="False" />
+                <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
+                    <Button Content="New" Margin="0,0,6,0" Click="New_Click" ToolTip="New label (Ctrl+N)" />
+                    <Button Content="Open" Margin="0,0,6,0" Click="Open_Click" ToolTip="Open label (Ctrl+O)" />
+                    <Button x:Name="SaveButton" Content="Save" Margin="0,0,6,0" Click="Save_Click" IsEnabled="False" ToolTip="Save label (Ctrl+S)" />
+                    <Button x:Name="ExportButton" Content="Export" Click="Export_Click" IsEnabled="False" ToolTip="Export a 300 DPI PNG" />
                 </StackPanel>
 
-                <StackPanel Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Center">
-                    <Button x:Name="DuplicateButton" Content="Duplicate" Margin="0,0,8,0" Click="Duplicate_Click" IsEnabled="False" />
-                    <Button x:Name="DeleteButton" Content="Delete" Click="Delete_Click" IsEnabled="False" />
+                <Border Grid.Column="2" Width="1" Height="30" Margin="12,0" Background="{StaticResource SubtleBorderBrush}" />
+                <StackPanel Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Center" Margin="25,0,0,0">
+                    <Button x:Name="UndoButton" Content="Undo" Style="{StaticResource CompactButton}" Margin="0,0,6,0" Click="Undo_Click" IsEnabled="False" ToolTip="Undo (Ctrl+Z)" />
+                    <Button x:Name="RedoButton" Content="Redo" Style="{StaticResource CompactButton}" Click="Redo_Click" IsEnabled="False" ToolTip="Redo (Ctrl+Y or Ctrl+Shift+Z)" />
                 </StackPanel>
+
+                <Button x:Name="DeviceStatusButton" Grid.Column="4" Style="{StaticResource DeviceChipButton}"
+                        Content="Device · Offline" Click="DeviceStatus_Click" ToolTip="Open device details"
+                        AutomationProperties.Name="Open device details" />
             </Grid>
         </Border>
 
         <Grid Grid.Row="1">
             <Grid.ColumnDefinitions>
-                <ColumnDefinition Width="220" />
+                <ColumnDefinition Width="210" />
                 <ColumnDefinition Width="*" />
-                <ColumnDefinition Width="350" />
+                <ColumnDefinition Width="340" />
             </Grid.ColumnDefinitions>
 
-            <Border Grid.Column="0" Background="#FAFAFC" BorderBrush="#E2E5EB" BorderThickness="0,0,1,0" Padding="16,18">
+            <Border Grid.Column="0" Background="{StaticResource PanelBrush}" BorderBrush="{StaticResource SubtleBorderBrush}" BorderThickness="0,0,1,0" Padding="16,18">
                 <Grid>
-                    <Border x:Name="NoDocumentToolsHint" Background="#F1F2F5" CornerRadius="9" Padding="12" VerticalAlignment="Top">
+                    <Border x:Name="NoDocumentToolsHint" Style="{StaticResource Card}" Background="#F1F2F5" VerticalAlignment="Top">
                         <StackPanel>
-                            <TextBlock Text="NO LABEL" Style="{StaticResource SectionTitle}" />
-                            <TextBlock Text="Create a label from installed media, choose a custom size, or open a saved label."
-                                       TextWrapping="Wrap" Foreground="{StaticResource MutedBrush}" FontSize="12" />
+                            <TextBlock Text="Add elements" Style="{StaticResource SectionTitle}" />
+                            <TextBlock Text="Create or open a label to add text, barcodes, shapes, and images." Style="{StaticResource HintText}" />
                         </StackPanel>
                     </Border>
+
                     <ScrollViewer x:Name="EditorToolsPanel" Visibility="Collapsed" VerticalScrollBarVisibility="Auto">
                         <StackPanel>
-                            <TextBlock Text="ADD TO LABEL" Style="{StaticResource SectionTitle}" />
-                            <Button Style="{StaticResource ToolButton}" Content="T   Text" Tag="Text" Click="AddElement_Click" />
-                            <Button Style="{StaticResource ToolButton}" Content="▥   Code 128 barcode" Tag="Barcode" Click="AddElement_Click" />
-                            <Button Style="{StaticResource ToolButton}" Content="□   Rectangle" Tag="Rectangle" Click="AddElement_Click" />
-                            <Button Style="{StaticResource ToolButton}" Content="—   Line" Tag="Line" Click="AddElement_Click" />
-                            <Button Style="{StaticResource ToolButton}" Content="▧   Image" Tag="Image" Click="AddElement_Click" />
-                            <Separator Margin="0,10,0,14" Background="#E2E5EB" />
-                            <TextBlock Text="LABEL INFORMATION" Style="{StaticResource SectionTitle}" />
-                            <TextBlock Text="Name" Style="{StaticResource FieldLabel}" />
-                            <TextBox x:Name="DocumentNameBox" LostFocus="DocumentField_LostFocus" />
-                            <Grid Margin="0,4,0,0">
-                                <Grid.ColumnDefinitions><ColumnDefinition /><ColumnDefinition Width="8" /><ColumnDefinition /></Grid.ColumnDefinitions>
-                                <StackPanel><TextBlock Text="Length (mm)" Style="{StaticResource FieldLabel}" /><TextBox x:Name="DocumentWidthBox" LostFocus="DocumentField_LostFocus" /></StackPanel>
-                                <StackPanel Grid.Column="2"><TextBlock Text="Tape width (mm)" Style="{StaticResource FieldLabel}" /><TextBox x:Name="DocumentHeightBox" LostFocus="DocumentField_LostFocus" /></StackPanel>
-                            </Grid>
-                            <TextBlock x:Name="DocumentMediaBindingText" Margin="0,9,0,0" Foreground="{StaticResource MutedBrush}" FontSize="11" TextWrapping="Wrap" />
+                            <TextBlock Text="Add elements" Style="{StaticResource SectionTitle}" />
+                            <Button Style="{StaticResource ToolButton}" Tag="Text" Click="AddElement_Click" AutomationProperties.Name="Add text">
+                                <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="26" /><ColumnDefinition /></Grid.ColumnDefinitions><Path Data="{StaticResource TextToolIcon}" Stroke="{StaticResource InkBrush}" StrokeThickness="1.5" Width="18" Height="18" Stretch="Uniform" /><TextBlock Grid.Column="1" Text="Text" VerticalAlignment="Center" /></Grid>
+                            </Button>
+                            <Button Style="{StaticResource ToolButton}" Tag="Barcode" Click="AddElement_Click" AutomationProperties.Name="Add Code 128 barcode">
+                                <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="26" /><ColumnDefinition /></Grid.ColumnDefinitions><Path Data="{StaticResource BarcodeToolIcon}" Stroke="{StaticResource InkBrush}" StrokeThickness="1.2" Width="18" Height="18" Stretch="Uniform" /><TextBlock Grid.Column="1" Text="Code 128 barcode" VerticalAlignment="Center" /></Grid>
+                            </Button>
+                            <Button Style="{StaticResource ToolButton}" Tag="Rectangle" Click="AddElement_Click" AutomationProperties.Name="Add rectangle">
+                                <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="26" /><ColumnDefinition /></Grid.ColumnDefinitions><Path Data="{StaticResource RectangleToolIcon}" Stroke="{StaticResource InkBrush}" StrokeThickness="1.5" Width="18" Height="18" Stretch="Uniform" /><TextBlock Grid.Column="1" Text="Rectangle" VerticalAlignment="Center" /></Grid>
+                            </Button>
+                            <Button Style="{StaticResource ToolButton}" Tag="Line" Click="AddElement_Click" AutomationProperties.Name="Add line">
+                                <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="26" /><ColumnDefinition /></Grid.ColumnDefinitions><Path Data="{StaticResource LineToolIcon}" Stroke="{StaticResource InkBrush}" StrokeThickness="1.5" Width="18" Height="18" Stretch="Uniform" /><TextBlock Grid.Column="1" Text="Line" VerticalAlignment="Center" /></Grid>
+                            </Button>
+                            <Button Style="{StaticResource ToolButton}" Tag="Image" Click="AddElement_Click" AutomationProperties.Name="Add image">
+                                <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="26" /><ColumnDefinition /></Grid.ColumnDefinitions><Path Data="{StaticResource ImageToolIcon}" Stroke="{StaticResource InkBrush}" StrokeThickness="1.3" Width="18" Height="18" Stretch="Uniform" /><TextBlock Grid.Column="1" Text="Image" VerticalAlignment="Center" /></Grid>
+                            </Button>
+
+                            <Border Style="{StaticResource Card}" Background="#F4F3FA" Margin="0,12,0,0">
+                                <StackPanel>
+                                    <TextBlock Text="Canvas shortcuts" FontFamily="Segoe UI Semibold" FontSize="12" />
+                                    <TextBlock Text="Arrows move · Shift moves 1 mm&#x0a;Ctrl+D duplicates · Delete removes&#x0a;Ctrl+wheel zooms" Style="{StaticResource HintText}" Margin="0,5,0,0" />
+                                </StackPanel>
+                            </Border>
                         </StackPanel>
                     </ScrollViewer>
                 </Grid>
             </Border>
 
-            <Grid Grid.Column="1" Background="#ECEEF2">
-                <ScrollViewer x:Name="CanvasScrollViewer" Visibility="Collapsed" HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto" Padding="48">
+            <Grid Grid.Column="1" Background="{StaticResource CanvasBrush}">
+                <ScrollViewer x:Name="CanvasScrollViewer" Visibility="Collapsed"
+                              HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto" Padding="36">
                     <Grid HorizontalAlignment="Center" VerticalAlignment="Center">
-                        <Border x:Name="LabelSurface" Background="White" BorderBrush="#CDD1D9" BorderThickness="1" Effect="{DynamicResource LabelShadow}">
+                        <Border x:Name="LabelSurface" Background="White" BorderBrush="#A4ACBA" BorderThickness="1" Effect="{DynamicResource LabelShadow}">
                             <Canvas x:Name="DesignCanvas" Background="White" ClipToBounds="True" MouseLeftButtonDown="DesignCanvas_MouseLeftButtonDown" />
                         </Border>
                     </Grid>
                 </ScrollViewer>
 
-                <Border x:Name="EmptyWorkspacePanel" Width="480" Padding="30" CornerRadius="14" Background="White"
-                        BorderBrush="#DDE1E8" BorderThickness="1" HorizontalAlignment="Center" VerticalAlignment="Center" Effect="{DynamicResource LabelShadow}">
+                <Border x:Name="EmptyWorkspacePanel" Width="470" Padding="28" CornerRadius="14" Background="White"
+                        BorderBrush="{StaticResource SubtleBorderBrush}" BorderThickness="1"
+                        HorizontalAlignment="Center" VerticalAlignment="Center" Effect="{DynamicResource LabelShadow}">
                     <StackPanel>
                         <TextBlock Text="Create your first label" FontFamily="Segoe UI Semibold" FontSize="23" HorizontalAlignment="Center" />
-                        <TextBlock x:Name="EmptyWorkspaceMessage" Text="No label is open. Connect a label maker, use a custom size, or open an existing file."
-                                   TextWrapping="Wrap" TextAlignment="Center" Foreground="{StaticResource MutedBrush}" Margin="0,8,0,18" />
-                        <Button x:Name="EmptyUseMediaButton" Content="Use installed media" Style="{StaticResource PrimaryButton}"
+                        <TextBlock x:Name="EmptyWorkspaceMessage"
+                                   Text="Create from installed media, choose a custom size, or open a saved label. Printer setup is available in Device."
+                                   TextWrapping="Wrap" TextAlignment="Center" Foreground="{StaticResource MutedBrush}" FontSize="13" Margin="0,8,0,18" />
+                        <Button x:Name="EmptyUseMediaButton" Content="Create from installed media" Style="{StaticResource PrimaryButton}"
                                 Click="UseLoadedMedia_Click" IsEnabled="False" />
                         <Grid Margin="0,12,0,0">
                             <Grid.ColumnDefinitions><ColumnDefinition /><ColumnDefinition Width="10" /><ColumnDefinition /></Grid.ColumnDefinitions>
-                            <StackPanel><TextBlock Text="Label length (mm)" Style="{StaticResource FieldLabel}" /><TextBox x:Name="NewLabelLengthBox" Text="40" /></StackPanel>
-                            <StackPanel Grid.Column="2"><TextBlock Text="Tape width (mm)" Style="{StaticResource FieldLabel}" /><TextBox x:Name="NewLabelWidthBox" Text="15" /></StackPanel>
+                            <StackPanel>
+                                <TextBlock x:Name="NewLabelLengthLabel" Text="Label length (mm)" Style="{StaticResource FieldLabel}" />
+                                <TextBox x:Name="NewLabelLengthBox" Text="40" PreviewKeyDown="NewLabelField_PreviewKeyDown" AutomationProperties.LabeledBy="{Binding ElementName=NewLabelLengthLabel}" />
+                            </StackPanel>
+                            <StackPanel Grid.Column="2">
+                                <TextBlock x:Name="NewLabelWidthLabel" Text="Tape width (mm)" Style="{StaticResource FieldLabel}" />
+                                <TextBox x:Name="NewLabelWidthBox" Text="15" PreviewKeyDown="NewLabelField_PreviewKeyDown" AutomationProperties.LabeledBy="{Binding ElementName=NewLabelWidthLabel}" />
+                            </StackPanel>
                         </Grid>
+                        <TextBlock x:Name="NewLabelValidationText" Style="{StaticResource ErrorText}" AutomationProperties.LiveSetting="Polite" />
                         <Button Content="Create custom-size label" Margin="0,10,0,0" Click="CreateCustomLabel_Click" />
-                        <Grid Margin="0,10,0,0">
-                            <Grid.ColumnDefinitions><ColumnDefinition /><ColumnDefinition Width="10" /><ColumnDefinition /></Grid.ColumnDefinitions>
-                            <Button Content="Open saved label" Click="Open_Click" />
-                            <Button Grid.Column="2" Content="Find label maker" Click="FindPrinter_Click" />
-                        </Grid>
+                        <Button Content="Open saved label" Margin="0,9,0,0" Click="Open_Click" />
+                    </StackPanel>
+                </Border>
+
+                <Border x:Name="ZoomToolbar" Visibility="Collapsed" HorizontalAlignment="Right" VerticalAlignment="Bottom"
+                        Margin="0,0,16,16" Background="White" BorderBrush="{StaticResource SubtleBorderBrush}" BorderThickness="1"
+                        CornerRadius="9" Padding="5" Effect="{DynamicResource LabelShadow}">
+                    <StackPanel Orientation="Horizontal">
+                        <Button Content="−" Style="{StaticResource CompactButton}" Width="32" Click="ZoomOut_Click" ToolTip="Zoom out" AutomationProperties.Name="Zoom out" />
+                        <Button x:Name="ZoomLevelButton" Content="100%" Style="{StaticResource CompactButton}" MinWidth="58" Margin="4,0" Click="ActualSize_Click" ToolTip="Reset to 100% (Ctrl+1)" AutomationProperties.Name="Current zoom; reset to 100 percent" />
+                        <Button Content="+" Style="{StaticResource CompactButton}" Width="32" Click="ZoomIn_Click" ToolTip="Zoom in" AutomationProperties.Name="Zoom in" />
+                        <Button Content="Fit" Style="{StaticResource CompactButton}" Margin="5,0,0,0" Click="Fit_Click" ToolTip="Fit label (Ctrl+0)" />
                     </StackPanel>
                 </Border>
             </Grid>
 
-            <Border Grid.Column="2" Background="#FAFAFC" BorderBrush="#E2E5EB" BorderThickness="1,0,0,0">
-                <ScrollViewer VerticalScrollBarVisibility="Auto">
-                    <StackPanel Margin="16">
-                        <TextBlock Text="LABEL MAKER" Style="{StaticResource SectionTitle}" />
-                        <Border Background="White" BorderBrush="#E0E3EA" BorderThickness="1" CornerRadius="9" Padding="11">
-                            <StackPanel>
-                                <TextBlock x:Name="PrinterConnectionText" Text="Disconnected" FontFamily="Segoe UI Semibold" FontSize="14" />
-                                <TextBlock x:Name="PrinterIdentityText" Text="No label maker selected." TextWrapping="Wrap" Foreground="{StaticResource MutedBrush}" FontSize="11" Margin="0,4,0,0" />
-                                <TextBlock x:Name="PrinterHealthText" Text="Connect a printer to read hardware health." TextWrapping="Wrap" FontSize="11" Margin="0,7,0,0" />
-                                <WrapPanel Margin="0,9,0,0">
-                                    <Button x:Name="FindPrinterButton" Content="Find / change" Margin="0,0,7,7" Click="FindPrinter_Click" />
-                                    <Button x:Name="RetryPrinterButton" Content="Retry" Margin="0,0,7,7" Click="RetryPrinter_Click" Visibility="Collapsed" />
-                                    <Button x:Name="DisconnectPrinterButton" Content="Disconnect" Margin="0,0,7,7" Click="DisconnectPrinter_Click" Visibility="Collapsed" />
-                                    <Button x:Name="ForgetPrinterButton" Content="Forget" Margin="0,0,7,7" Click="ForgetPrinter_Click" Visibility="Collapsed" />
-                                </WrapPanel>
-                                <StackPanel x:Name="PrinterCandidatesPanel" Visibility="Collapsed">
-                                    <TextBlock x:Name="PrinterScanStatusText" Text="Searching…" Foreground="{StaticResource MutedBrush}" FontSize="11" />
-                                    <ListBox x:Name="PrinterCandidatesList" DisplayMemberPath="DisplayName" MinHeight="54" MaxHeight="130" Margin="0,6,0,0" />
-                                    <Button x:Name="ConnectSelectedPrinterButton" Content="Connect selected" Style="{StaticResource PrimaryButton}" Margin="0,7,0,0" Click="ConnectSelectedPrinter_Click" />
-                                </StackPanel>
-                                <Expander Header="Diagnostics" Margin="0,5,0,0">
-                                    <TextBlock x:Name="DiagnosticsText" Text="No live diagnostics." FontFamily="Consolas" FontSize="10" TextWrapping="Wrap" Margin="0,6,0,0" />
-                                </Expander>
-                            </StackPanel>
-                        </Border>
-
-                        <TextBlock Text="INSTALLED MEDIA" Style="{StaticResource SectionTitle}" Margin="0,14,0,8" />
-                        <Border Background="White" BorderBrush="#E0E3EA" BorderThickness="1" CornerRadius="9" Padding="11">
-                            <StackPanel>
-                                <TextBlock x:Name="MediaStateText" Text="Unknown" FontFamily="Segoe UI Semibold" FontSize="14" />
-                                <TextBlock x:Name="MediaInformationText" Text="Connect an E12 to read installed media." TextWrapping="Wrap" Foreground="{StaticResource MutedBrush}" FontSize="11" Margin="0,4,0,0" />
-                                <WrapPanel Margin="0,9,0,0">
-                                    <Button x:Name="RefreshMediaButton" Content="Read media again" Margin="0,0,7,7" Click="RefreshMedia_Click" IsEnabled="False" />
-                                    <Button x:Name="UseInstalledMediaButton" Content="Use installed media" Margin="0,0,7,7" Click="UseLoadedMedia_Click" IsEnabled="False" />
-                                </WrapPanel>
-                            </StackPanel>
-                        </Border>
-
-                        <TextBlock Text="PRINT" Style="{StaticResource SectionTitle}" Margin="0,14,0,8" />
-                        <Border Background="White" BorderBrush="#E0E3EA" BorderThickness="1" CornerRadius="9" Padding="11">
-                            <StackPanel>
-                                <TextBlock Text="1-bit output preview" Style="{StaticResource FieldLabel}" Margin="0" />
-                                <Border Background="White" BorderBrush="#CDD1D9" BorderThickness="1" Padding="5" MinHeight="72" Margin="0,4,0,0">
-                                    <Image x:Name="PrintRasterPreview" Stretch="Uniform" RenderOptions.BitmapScalingMode="NearestNeighbor" />
+            <Border Grid.Column="2" Background="{StaticResource PanelBrush}" BorderBrush="{StaticResource SubtleBorderBrush}" BorderThickness="1,0,0,0">
+                <TabControl x:Name="WorkspaceTabs" Style="{StaticResource WorkspaceTabs}">
+                    <TabItem x:Name="PropertiesTab" Header="Properties" AutomationProperties.Name="Properties">
+                        <ScrollViewer VerticalScrollBarVisibility="Auto" Foreground="{StaticResource InkBrush}">
+                            <StackPanel Margin="16">
+                                <Border x:Name="NoDocumentPropertiesHint" Style="{StaticResource Card}" Background="#F1F2F5">
+                                    <TextBlock Text="Create or open a label to edit its properties." Style="{StaticResource HintText}" />
                                 </Border>
-                                <TextBlock x:Name="PrintRasterPreviewCaption" Text="Create a label to see its thermal-dot preview." TextWrapping="Wrap" Foreground="{StaticResource MutedBrush}" FontSize="10" Margin="0,4,0,0" />
-                                <TextBlock Text="Density" Style="{StaticResource FieldLabel}" />
-                                <Grid>
-                                    <Grid.ColumnDefinitions><ColumnDefinition /><ColumnDefinition Width="35" /></Grid.ColumnDefinitions>
-                                    <Slider x:Name="DensitySlider" Minimum="0" Maximum="15" Value="7" TickFrequency="1" IsSnapToTickEnabled="True" ValueChanged="DensitySlider_ValueChanged" />
-                                    <TextBlock Grid.Column="1" Text="{Binding ElementName=DensitySlider, Path=Value, StringFormat={}{0:0}}" HorizontalAlignment="Right" />
-                                </Grid>
-                                <TextBlock x:Name="ReadinessText" Text="● Label — Create or open a label." TextWrapping="Wrap" FontSize="11" Margin="0,9,0,0" />
-                                <Button x:Name="PrintButton" Content="Print label" Style="{StaticResource PrimaryButton}" Margin="0,10,0,0" Click="Print_Click" IsEnabled="False" />
-                            </StackPanel>
-                        </Border>
 
-                        <Separator Margin="0,20,0,14" Background="#E2E5EB" />
-                        <TextBlock Text="SELECTED ELEMENT" Style="{StaticResource SectionTitle}" />
-                        <Border x:Name="NoSelectionHint" Background="#F1F2F5" CornerRadius="7" Padding="10">
-                            <TextBlock Text="Select an element on the label to edit it." TextWrapping="Wrap" Foreground="{StaticResource MutedBrush}" />
-                        </Border>
-                        <StackPanel x:Name="ElementInspector" IsEnabled="False" Visibility="Collapsed">
-                            <TextBlock x:Name="ElementKindText" FontFamily="Segoe UI Semibold" FontSize="14" Margin="0,0,0,3" />
-                            <StackPanel x:Name="ContentFieldPanel"><TextBlock Text="Content" Style="{StaticResource FieldLabel}" /><TextBox x:Name="ElementContentBox" AcceptsReturn="True" TextWrapping="Wrap" MinHeight="52" LostFocus="ElementField_LostFocus" /></StackPanel>
-                            <Grid><Grid.ColumnDefinitions><ColumnDefinition /><ColumnDefinition Width="8" /><ColumnDefinition /></Grid.ColumnDefinitions><StackPanel><TextBlock Text="X (mm)" Style="{StaticResource FieldLabel}" /><TextBox x:Name="ElementXBox" LostFocus="ElementField_LostFocus" /></StackPanel><StackPanel Grid.Column="2"><TextBlock Text="Y (mm)" Style="{StaticResource FieldLabel}" /><TextBox x:Name="ElementYBox" LostFocus="ElementField_LostFocus" /></StackPanel></Grid>
-                            <Grid><Grid.ColumnDefinitions><ColumnDefinition /><ColumnDefinition Width="8" /><ColumnDefinition /></Grid.ColumnDefinitions><StackPanel><TextBlock Text="Width (mm)" Style="{StaticResource FieldLabel}" /><TextBox x:Name="ElementWidthBox" LostFocus="ElementField_LostFocus" /></StackPanel><StackPanel Grid.Column="2"><TextBlock Text="Height (mm)" Style="{StaticResource FieldLabel}" /><TextBox x:Name="ElementHeightBox" LostFocus="ElementField_LostFocus" /></StackPanel></Grid>
-                            <Grid><Grid.ColumnDefinitions><ColumnDefinition /><ColumnDefinition Width="8" /><ColumnDefinition /></Grid.ColumnDefinitions><StackPanel><TextBlock Text="Rotation (°)" Style="{StaticResource FieldLabel}" /><TextBox x:Name="ElementRotationBox" LostFocus="ElementField_LostFocus" /></StackPanel><StackPanel Grid.Column="2" x:Name="StrokeFieldPanel"><TextBlock Text="Stroke (mm)" Style="{StaticResource FieldLabel}" /><TextBox x:Name="ElementStrokeBox" LostFocus="ElementField_LostFocus" /></StackPanel></Grid>
-                            <StackPanel x:Name="FontFieldPanel"><Grid><Grid.ColumnDefinitions><ColumnDefinition /><ColumnDefinition Width="8" /><ColumnDefinition /></Grid.ColumnDefinitions><StackPanel><TextBlock Text="Font size (pt)" Style="{StaticResource FieldLabel}" /><TextBox x:Name="ElementFontSizeBox" LostFocus="ElementField_LostFocus" /></StackPanel><CheckBox x:Name="ElementBoldBox" Grid.Column="2" Content="Bold" VerticalAlignment="Bottom" Margin="0,0,0,7" Checked="ElementBold_Changed" Unchecked="ElementBold_Changed" /></Grid></StackPanel>
-                        </StackPanel>
-                    </StackPanel>
-                </ScrollViewer>
+                                <StackPanel x:Name="PropertiesPanel" Visibility="Collapsed">
+                                    <TextBlock Text="Element properties" Style="{StaticResource SectionTitle}" />
+                                    <Border x:Name="NoSelectionHint" Style="{StaticResource Card}" Background="#F1F2F5">
+                                        <TextBlock Text="Select an element on the label to edit it." Style="{StaticResource HintText}" />
+                                    </Border>
+
+                                    <StackPanel x:Name="ElementInspector" IsEnabled="False" Visibility="Collapsed">
+                                        <Grid Margin="0,0,0,3">
+                                            <Grid.ColumnDefinitions><ColumnDefinition /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
+                                            <TextBlock x:Name="ElementKindText" FontFamily="Segoe UI Semibold" FontSize="16" VerticalAlignment="Center" />
+                                            <StackPanel Grid.Column="1" Orientation="Horizontal">
+                                                <Button x:Name="DuplicateButton" Content="Duplicate" Style="{StaticResource CompactButton}" Margin="0,0,6,0" Click="Duplicate_Click" IsEnabled="False" ToolTip="Duplicate (Ctrl+D)" />
+                                                <Button x:Name="DeleteButton" Content="Delete" Style="{StaticResource DangerButton}" Padding="9,5" MinHeight="30" Click="Delete_Click" IsEnabled="False" ToolTip="Delete selection" />
+                                            </StackPanel>
+                                        </Grid>
+
+                                        <StackPanel x:Name="ContentFieldPanel">
+                                            <TextBlock x:Name="ElementContentLabel" Text="Content" Style="{StaticResource FieldLabel}" />
+                                            <TextBox x:Name="ElementContentBox" AcceptsReturn="True" TextWrapping="Wrap" MinHeight="58"
+                                                     TextChanged="ElementContent_TextChanged" LostFocus="TextField_LostFocus" PreviewKeyDown="TextField_PreviewKeyDown"
+                                                     AutomationProperties.LabeledBy="{Binding ElementName=ElementContentLabel}" />
+                                        </StackPanel>
+
+                                        <StackPanel x:Name="FontFieldPanel">
+                                            <TextBlock x:Name="ElementFontFamilyLabel" Text="Font family" Style="{StaticResource FieldLabel}" />
+                                            <ComboBox x:Name="ElementFontFamilyBox" IsTextSearchEnabled="True" MaxDropDownHeight="300"
+                                                      SelectionChanged="ElementFontFamily_SelectionChanged"
+                                                      AutomationProperties.LabeledBy="{Binding ElementName=ElementFontFamilyLabel}" />
+                                        </StackPanel>
+
+                                        <Grid>
+                                            <Grid.ColumnDefinitions><ColumnDefinition /><ColumnDefinition Width="8" /><ColumnDefinition /></Grid.ColumnDefinitions>
+                                            <StackPanel><TextBlock x:Name="ElementXLabel" Text="X (mm)" Style="{StaticResource FieldLabel}" /><TextBox x:Name="ElementXBox" LostFocus="ElementField_LostFocus" PreviewKeyDown="EditorField_PreviewKeyDown" AutomationProperties.LabeledBy="{Binding ElementName=ElementXLabel}" /></StackPanel>
+                                            <StackPanel Grid.Column="2"><TextBlock x:Name="ElementYLabel" Text="Y (mm)" Style="{StaticResource FieldLabel}" /><TextBox x:Name="ElementYBox" LostFocus="ElementField_LostFocus" PreviewKeyDown="EditorField_PreviewKeyDown" AutomationProperties.LabeledBy="{Binding ElementName=ElementYLabel}" /></StackPanel>
+                                        </Grid>
+                                        <Grid>
+                                            <Grid.ColumnDefinitions><ColumnDefinition /><ColumnDefinition Width="8" /><ColumnDefinition /></Grid.ColumnDefinitions>
+                                            <StackPanel><TextBlock x:Name="ElementWidthLabel" Text="Width (mm)" Style="{StaticResource FieldLabel}" /><TextBox x:Name="ElementWidthBox" LostFocus="ElementField_LostFocus" PreviewKeyDown="EditorField_PreviewKeyDown" AutomationProperties.LabeledBy="{Binding ElementName=ElementWidthLabel}" /></StackPanel>
+                                            <StackPanel Grid.Column="2"><TextBlock x:Name="ElementHeightLabel" Text="Height (mm)" Style="{StaticResource FieldLabel}" /><TextBox x:Name="ElementHeightBox" LostFocus="ElementField_LostFocus" PreviewKeyDown="EditorField_PreviewKeyDown" AutomationProperties.LabeledBy="{Binding ElementName=ElementHeightLabel}" /></StackPanel>
+                                        </Grid>
+                                        <Grid>
+                                            <Grid.ColumnDefinitions><ColumnDefinition /><ColumnDefinition Width="8" /><ColumnDefinition /></Grid.ColumnDefinitions>
+                                            <StackPanel><TextBlock x:Name="ElementRotationLabel" Text="Rotation (°)" Style="{StaticResource FieldLabel}" /><TextBox x:Name="ElementRotationBox" LostFocus="ElementField_LostFocus" PreviewKeyDown="EditorField_PreviewKeyDown" AutomationProperties.LabeledBy="{Binding ElementName=ElementRotationLabel}" /></StackPanel>
+                                            <StackPanel Grid.Column="2" x:Name="StrokeFieldPanel"><TextBlock x:Name="ElementStrokeLabel" Text="Stroke (mm)" Style="{StaticResource FieldLabel}" /><TextBox x:Name="ElementStrokeBox" LostFocus="ElementField_LostFocus" PreviewKeyDown="EditorField_PreviewKeyDown" AutomationProperties.LabeledBy="{Binding ElementName=ElementStrokeLabel}" /></StackPanel>
+                                        </Grid>
+                                        <Grid x:Name="FontSizeFieldPanel">
+                                            <Grid.ColumnDefinitions><ColumnDefinition /><ColumnDefinition Width="8" /><ColumnDefinition /></Grid.ColumnDefinitions>
+                                            <StackPanel><TextBlock x:Name="ElementFontSizeLabel" Text="Font size (pt)" Style="{StaticResource FieldLabel}" /><TextBox x:Name="ElementFontSizeBox" LostFocus="ElementField_LostFocus" PreviewKeyDown="EditorField_PreviewKeyDown" AutomationProperties.LabeledBy="{Binding ElementName=ElementFontSizeLabel}" /></StackPanel>
+                                            <CheckBox x:Name="ElementBoldBox" Grid.Column="2" Content="Bold" VerticalAlignment="Bottom" Margin="0,0,0,8" Checked="ElementBold_Changed" Unchecked="ElementBold_Changed" />
+                                        </Grid>
+                                        <TextBlock x:Name="ElementValidationText" Style="{StaticResource ErrorText}" AutomationProperties.LiveSetting="Polite" />
+                                    </StackPanel>
+
+                                    <Separator Margin="0,20,0,16" Background="{StaticResource SubtleBorderBrush}" />
+                                    <TextBlock Text="Label settings" Style="{StaticResource SectionTitle}" />
+                                    <TextBlock x:Name="DocumentNameLabel" Text="Name" Style="{StaticResource FieldLabel}" />
+                                    <TextBox x:Name="DocumentNameBox" TextChanged="DocumentName_TextChanged" LostFocus="TextField_LostFocus" PreviewKeyDown="TextField_PreviewKeyDown" AutomationProperties.LabeledBy="{Binding ElementName=DocumentNameLabel}" />
+                                    <Grid Margin="0,3,0,0">
+                                        <Grid.ColumnDefinitions><ColumnDefinition /><ColumnDefinition Width="8" /><ColumnDefinition /></Grid.ColumnDefinitions>
+                                        <StackPanel><TextBlock x:Name="DocumentWidthLabel" Text="Length (mm)" Style="{StaticResource FieldLabel}" /><TextBox x:Name="DocumentWidthBox" LostFocus="DocumentField_LostFocus" PreviewKeyDown="EditorField_PreviewKeyDown" AutomationProperties.LabeledBy="{Binding ElementName=DocumentWidthLabel}" /></StackPanel>
+                                        <StackPanel Grid.Column="2"><TextBlock x:Name="DocumentHeightLabel" Text="Tape width (mm)" Style="{StaticResource FieldLabel}" /><TextBox x:Name="DocumentHeightBox" LostFocus="DocumentField_LostFocus" PreviewKeyDown="EditorField_PreviewKeyDown" AutomationProperties.LabeledBy="{Binding ElementName=DocumentHeightLabel}" /></StackPanel>
+                                    </Grid>
+                                    <TextBlock x:Name="DocumentValidationText" Style="{StaticResource ErrorText}" AutomationProperties.LiveSetting="Polite" />
+                                    <TextBlock x:Name="DocumentMediaBindingText" Margin="0,10,0,0" Style="{StaticResource HintText}" />
+                                </StackPanel>
+                            </StackPanel>
+                        </ScrollViewer>
+                    </TabItem>
+
+                    <TabItem x:Name="PrintTab" Header="Print" AutomationProperties.Name="Print">
+                        <ScrollViewer VerticalScrollBarVisibility="Auto" Foreground="{StaticResource InkBrush}">
+                            <StackPanel Margin="16">
+                                <TextBlock Text="Print preview" Style="{StaticResource SectionTitle}" />
+                                <Border Style="{StaticResource Card}">
+                                    <StackPanel>
+                                        <TextBlock Text="1-bit thermal output" FontFamily="Segoe UI Semibold" FontSize="13" />
+                                        <Border Background="White" BorderBrush="{StaticResource ControlBorderBrush}" BorderThickness="1" Padding="6" MinHeight="112" Margin="0,8,0,0">
+                                            <Image x:Name="PrintRasterPreview" Stretch="Uniform" RenderOptions.BitmapScalingMode="NearestNeighbor" AutomationProperties.Name="Thermal output preview" />
+                                        </Border>
+                                        <TextBlock x:Name="PrintRasterPreviewCaption" Text="Create a label to see its thermal-dot preview." Style="{StaticResource HintText}" Margin="0,6,0,0" />
+                                    </StackPanel>
+                                </Border>
+
+                                <TextBlock Text="Print settings" Style="{StaticResource SectionTitle}" Margin="0,16,0,10" />
+                                <Border Style="{StaticResource Card}">
+                                    <StackPanel>
+                                        <TextBlock x:Name="DensityLabel" Text="Density" Style="{StaticResource FieldLabel}" Margin="0,0,0,4" />
+                                        <Grid>
+                                            <Grid.ColumnDefinitions><ColumnDefinition /><ColumnDefinition Width="38" /></Grid.ColumnDefinitions>
+                                            <Slider x:Name="DensitySlider" Minimum="0" Maximum="15" Value="7" TickFrequency="1" IsSnapToTickEnabled="True" ValueChanged="DensitySlider_ValueChanged" AutomationProperties.LabeledBy="{Binding ElementName=DensityLabel}" />
+                                            <TextBlock Grid.Column="1" Text="{Binding ElementName=DensitySlider, Path=Value, StringFormat={}{0:0}}" HorizontalAlignment="Right" VerticalAlignment="Center" />
+                                        </Grid>
+                                        <TextBlock x:Name="ReadinessText" Text="● Label — Create or open a label." TextWrapping="Wrap" FontSize="12" Margin="0,12,0,0" AutomationProperties.Name="Print readiness" AutomationProperties.LiveSetting="Polite" />
+                                        <ProgressBar x:Name="PrintProgressBar" Height="4" Margin="0,12,0,0" IsIndeterminate="True" Visibility="Collapsed" AutomationProperties.Name="Printing in progress" />
+                                        <TextBlock x:Name="PrintProgressText" Style="{StaticResource HintText}" Margin="0,6,0,0" Visibility="Collapsed" AutomationProperties.LiveSetting="Polite" />
+                                        <Button x:Name="PrintButton" Content="Print label" Style="{StaticResource PrimaryButton}" Margin="0,12,0,0" Click="Print_Click" IsEnabled="False" />
+                                        <Button x:Name="MockPrintButton" Content="Save mock PNG" Margin="0,8,0,0" Click="MockPrint_Click" IsEnabled="False" ToolTip="Save safe 203 DPI mock output without using hardware" />
+                                    </StackPanel>
+                                </Border>
+                            </StackPanel>
+                        </ScrollViewer>
+                    </TabItem>
+
+                    <TabItem x:Name="DeviceTab" Header="Device" AutomationProperties.Name="Device">
+                        <ScrollViewer VerticalScrollBarVisibility="Auto" Foreground="{StaticResource InkBrush}">
+                            <StackPanel Margin="16">
+                                <TextBlock Text="Label maker" Style="{StaticResource SectionTitle}" />
+                                <Border Style="{StaticResource Card}">
+                                    <StackPanel>
+                                        <TextBlock x:Name="PrinterConnectionText" Text="Disconnected" FontFamily="Segoe UI Semibold" FontSize="16" AutomationProperties.LiveSetting="Polite" />
+                                        <TextBlock x:Name="PrinterIdentityText" Text="No label maker selected." Style="{StaticResource HintText}" Margin="0,4,0,0" />
+                                        <TextBlock x:Name="PrinterHealthText" Text="Connect a printer to read hardware health." TextWrapping="Wrap" FontSize="12" Margin="0,8,0,0" />
+                                        <WrapPanel Margin="0,10,0,0">
+                                            <Button x:Name="FindPrinterButton" Content="Find / change" Margin="0,0,7,7" Click="FindPrinter_Click" />
+                                            <Button x:Name="RetryPrinterButton" Content="Retry" Margin="0,0,7,7" Click="RetryPrinter_Click" Visibility="Collapsed" />
+                                            <Button x:Name="DisconnectPrinterButton" Content="Disconnect" Margin="0,0,7,7" Click="DisconnectPrinter_Click" Visibility="Collapsed" />
+                                            <Button x:Name="ForgetPrinterButton" Content="Forget" Style="{StaticResource DangerButton}" Margin="0,0,7,7" Click="ForgetPrinter_Click" Visibility="Collapsed" />
+                                        </WrapPanel>
+                                        <StackPanel x:Name="PrinterCandidatesPanel" Visibility="Collapsed">
+                                            <TextBlock x:Name="PrinterScanStatusText" Text="Searching…" Style="{StaticResource HintText}" AutomationProperties.LiveSetting="Polite" />
+                                            <TextBlock x:Name="PrinterCandidatesLabel" Text="Available label makers" Style="{StaticResource FieldLabel}" />
+                                            <ListBox x:Name="PrinterCandidatesList" DisplayMemberPath="DisplayName" MinHeight="62" MaxHeight="150" AutomationProperties.LabeledBy="{Binding ElementName=PrinterCandidatesLabel}" />
+                                            <Button x:Name="ConnectSelectedPrinterButton" Content="Connect selected" Style="{StaticResource PrimaryButton}" Margin="0,8,0,0" Click="ConnectSelectedPrinter_Click" />
+                                        </StackPanel>
+                                        <Expander Header="Diagnostics" Margin="0,7,0,0">
+                                            <TextBlock x:Name="DiagnosticsText" Text="No live diagnostics." FontFamily="Consolas" FontSize="11" TextWrapping="Wrap" Margin="0,7,0,0" />
+                                        </Expander>
+                                    </StackPanel>
+                                </Border>
+
+                                <TextBlock Text="Installed media" Style="{StaticResource SectionTitle}" Margin="0,16,0,10" />
+                                <Border Style="{StaticResource Card}">
+                                    <StackPanel>
+                                        <TextBlock x:Name="MediaStateText" Text="Unknown" FontFamily="Segoe UI Semibold" FontSize="16" AutomationProperties.LiveSetting="Polite" />
+                                        <TextBlock x:Name="MediaInformationText" Text="Connect an E12 to read installed media." Style="{StaticResource HintText}" Margin="0,4,0,0" />
+                                        <WrapPanel Margin="0,10,0,0">
+                                            <Button x:Name="RefreshMediaButton" Content="Read media again" Margin="0,0,7,7" Click="RefreshMedia_Click" IsEnabled="False" />
+                                            <Button x:Name="UseInstalledMediaButton" Content="Use installed media" Margin="0,0,7,7" Click="UseLoadedMedia_Click" IsEnabled="False" />
+                                        </WrapPanel>
+                                    </StackPanel>
+                                </Border>
+                            </StackPanel>
+                        </ScrollViewer>
+                    </TabItem>
+                </TabControl>
             </Border>
         </Grid>
 
         <Border Grid.Row="2" Background="#212633">
             <Grid Margin="14,0">
-                <TextBlock x:Name="StatusText" Text="Ready" Foreground="#E8EAF0" VerticalAlignment="Center" FontSize="11" />
-                <TextBlock x:Name="DocumentStatusText" Text="No label" Foreground="#AEB4C2" VerticalAlignment="Center" HorizontalAlignment="Right" FontSize="11" />
+                <TextBlock x:Name="StatusText" Text="Ready" Foreground="#F2F4F7" VerticalAlignment="Center" FontSize="12" AutomationProperties.LiveSetting="Polite" />
+                <TextBlock x:Name="DocumentStatusText" Text="No label" Foreground="#C7CCD6" VerticalAlignment="Center" HorizontalAlignment="Right" FontSize="12" />
             </Grid>
         </Border>
     </Grid>
