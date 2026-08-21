@@ -22,7 +22,7 @@ Etikra is an open-source Windows label designer for SUPVAN and KATASYMBOL therma
 | Mock/file output | Ready | Default and safe without hardware. |
 | USB HID | Experimental | Protocol is implemented; this Windows port has not yet been validated on physical hardware in this repository. |
 | Bluetooth Classic SPP | Researched, not implemented | Public work documents shared commands with different `7E 5A` framing. |
-| Bluetooth LE GATT | Researched, not implemented | Service/characteristic variants exist and need per-model validation, especially E-series devices. |
+| Bluetooth LE GATT | Discovery and probe ready | Active Windows scanning and read-only GATT service probing are implemented; print writes are not enabled yet. An available E12-class unit has confirmed the `FEE7/FEC1` path. |
 
 Known USB product IDs and head profiles come from the [supvan-cups model registry](https://github.com/heeen/supvan-cups/blob/master/data/models.toml). Unknown PID values are displayed but blocked from printing so Etikra never guesses a raster width.
 
@@ -64,7 +64,7 @@ The main source is [`heeen/supvan-cups`](https://github.com/heeen/supvan-cups), 
 - Column/feed-major LSB-first raster rows inside checksummed 4096-byte print buffers.
 - LZMA1-alone compression with an 8192-byte dictionary, `lc=3`, `lp=0`, `pb=2`, and an exact uncompressed-size header.
 
-The separate [`katasymbol-e12-lab`](https://github.com/eteriall/katasymbol-e12-lab) project is useful evidence for E12 BLE work. BLE remains intentionally outside the active backend until Etikra has hardware captures and repeatable tests.
+The separate [`katasymbol-e12-lab`](https://github.com/eteriall/katasymbol-e12-lab) project is useful evidence for E12 BLE work. Etikra now actively discovers BLE advertisements and can connect read-only to enumerate GATT services; write/print operations remain intentionally disabled until packet timing is validated.
 
 See [docs/PROTOCOL.md](docs/PROTOCOL.md) for Etikra's implementation notes and verification boundary.
 

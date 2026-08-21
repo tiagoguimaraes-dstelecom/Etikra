@@ -1,4 +1,5 @@
 using Etikra.Printing;
+using Etikra.Printing.Bluetooth;
 using Etikra.Services;
 using SevenZip.Compression.LZMA;
 
@@ -7,15 +8,26 @@ namespace Etikra.Tests;
 internal static class Program
 {
     [STAThread]
-    private static int Main()
+    private static async Task<int> Main(string[] args)
     {
+        if (args.Length > 0 && args[0].Equals("--ble-scan", StringComparison.OrdinalIgnoreCase))
+        {
+            return await ScanBluetoothAsync();
+        }
+
+        if (args.Length == 2 && args[0].Equals("--ble-probe", StringComparison.OrdinalIgnoreCase))
+        {
+            return await ProbeBluetoothAsync(args[1]);
+        }
+
         var tests = new (string Name, Action Run)[]
         {
             ("Code 128-B checksum", Code128Checksum),
             ("SUPVAN print-buffer header", PrintBufferHeader),
             ("LZMA firmware parameters and round trip", LzmaRoundTrip),
             ("End-to-end starter-label raster", StarterLabelRaster),
-            ("Known USB model registry", ModelRegistry)
+            ("Known USB model registry", ModelRegistry),
+            ("E12 BLE advertisement signature", E12AdvertisementSignature)
         };
 
         try
@@ -35,6 +47,46 @@ internal static class Program
             Console.Error.WriteLine(exception);
             return 1;
         }
+    }
+
+    private static async Task<int> ScanBluetoothAsync()
+    {
+        Console.WriteLine("Scanning BLE advertisements for 15 seconds…");
+        var devices = await BleDiscovery.ScanAsync(TimeSpan.FromSeconds(15));
+        foreach (var device in devices)
+        {
+            var marker = device.LooksLikeE12 ? "E12?" : "    ";
+            var services = device.ServiceUuids.Count == 0 ? "-" : string.Join(",", device.ServiceUuids);
+            Console.WriteLine($"{marker} {device.AddressText}  {device.Rssi,4} dBm  {device.Name,-24}  {services}");
+        }
+
+        Console.WriteLine($"Observed {devices.Count} BLE device(s); {devices.Count(device => device.LooksLikeE12)} E12 candidate(s).");
+        return 0;
+    }
+
+    private static async Task<int> ProbeBluetoothAsync(string addressText)
+    {
+        if (!BleDiscovery.TryParseAddress(addressText, out var address))
+        {
+            Console.Error.WriteLine("Invalid Bluetooth address.");
+            return 2;
+        }
+
+        Console.WriteLine($"Connecting read-only GATT probe to {BleDiscovery.FormatAddress(address)}…");
+        var result = await BleDiscovery.ProbeAsync(address);
+        Console.WriteLine($"Device: {result.Name}");
+        Console.WriteLine($"Connection: {result.ConnectionStatus}");
+        foreach (var service in result.Services)
+        {
+            Console.WriteLine($"Service {service.Uuid}");
+            foreach (var characteristic in service.Characteristics)
+            {
+                Console.WriteLine($"  {characteristic.Uuid}  {characteristic.Properties}");
+            }
+        }
+
+        Console.WriteLine(result.HasKnownE12Path ? "Known E12 FEE7/FEC1 path confirmed." : "Known E12 FEE7/FEC1 path not found.");
+        return 0;
     }
 
     private static void Code128Checksum()
@@ -95,6 +147,17 @@ internal static class Program
     {
         Equal("TP86A Pro", PrinterProfiles.Find(0x2081)?.Name, "TP86 PID");
         True(PrinterProfiles.Find(0xFFFF) is null, "unknown PID is rejected");
+    }
+
+    private static void E12AdvertisementSignature()
+    {
+        var advertisement = new BleAdvertisement(
+            0xA49340B01CBA,
+            "A4:93:40:B0:1C:BA",
+            "T0188A0000000000",
+            -50,
+            []);
+        True(advertisement.LooksLikeE12, "SUPVAN OUI and T-series advertisement should be recognized");
     }
 
     private static void Equal<T>(T expected, T actual, string label)

@@ -127,8 +127,10 @@ Etikra currently records these known USB families:
 
 The exact PID map is in `Printing/PrinterDevice.cs` and is derived from the upstream [`models.toml`](https://github.com/heeen/supvan-cups/blob/master/data/models.toml).
 
-## Bluetooth research boundary
+## Bluetooth status and research boundary
 
 The public T-series research describes Bluetooth Classic SPP commands with `7E 5A` framing, 16-byte commands, little-endian parameters, and framed 512-byte data packets. It also records several BLE GATT service/characteristic patterns used by E-series hardware. [`katasymbol-e12-lab`](https://github.com/eteriall/katasymbol-e12-lab) provides an additional independent E12 reference.
 
-Etikra does not yet expose either Bluetooth path. Before enabling one, add captured-frame fixtures, transport tests, cancellation behavior, device-name/model gating, and at least one physical round-trip report for each targeted family.
+Etikra now implements native Windows BLE advertisement scanning and a read-only GATT probe. A live E12-class hardware probe confirmed service `FEE7`, characteristic `FEC1`, and the `WriteWithoutResponse, Notify` properties described by the independent reference. The scanner also recognizes the observed SUPVAN `A4:93:40` OUI plus `T`/`G`/`D` serial-style advertisement names.
+
+Print writes remain disabled. Before enabling them, add captured-frame fixtures, notification/ack tests, negotiated-payload fragmentation, cancellation behavior, device-name/model gating, and a short physical test label with explicit operator confirmation.
