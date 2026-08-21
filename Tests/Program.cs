@@ -41,8 +41,10 @@ internal static class Program
             ("E12 BLE advertisement signature", E12AdvertisementSignature),
             ("E12 BLE command frame", E12CommandFrame),
             ("E12 material layout validation", E12MaterialLayout),
+            ("E12 continuous material mapping", E12ContinuousMaterial),
             ("E12 BLE raster data framing", E12DataFrames),
             ("SUPVAN head-axis mirror", PrintheadAxisMirror),
+            ("E12 15 mm tape centered on 12 mm head", E12ContinuousTapeCenterCrop),
             ("E12 landscape raster rotation", E12LandscapeRotation),
             ("E12 direct-thermal ribbon flag", E12RibbonFlag),
             ("Native monochrome print preview", MonochromePrintPreview)
@@ -159,6 +161,12 @@ internal static class Program
             throw new InvalidOperationException("A coherent die-cut label size was not returned; no print data was sent.");
         }
 
+        if (material.IsContinuous)
+        {
+            throw new InvalidOperationException(
+                "The fixed-size CLI test is disabled for continuous tape because its length must be chosen by the user; no print data was sent.");
+        }
+
         if (information.DotsPerMillimeter is not double dotsPerMillimeter)
         {
             throw new InvalidOperationException("The printer did not return its resolution; no print data was sent.");
@@ -171,7 +179,8 @@ internal static class Program
                 $"The returned media/resolution imply {printheadDots} dots across, not the live-tested E12 width of 96; no print data was sent.");
         }
 
-        if (material.LabelType > 3 || information.Status.BlockingErrors(ignoreDirectThermalRibbonEnd: true).Count > 0)
+        if (!material.TryGetE12PrintMaterialCode(out var printMaterialCode) ||
+            information.Status.BlockingErrors(ignoreDirectThermalRibbonEnd: true).Count > 0)
         {
             throw new InvalidOperationException("The returned material type or printer state is not safe for the verified test path; no print data was sent.");
         }
@@ -212,7 +221,7 @@ internal static class Program
             document,
             profile,
             density: 4,
-            materialType: material.LabelType,
+            materialType: printMaterialCode,
             orientation: SupvanRasterOrientation.RotateCounterClockwise);
         Console.WriteLine($"Printer reports {material.GeometryDescription}, type {material.LabelType}, {dotsPerMillimeter:0.##} dots/mm, firmware counter {material.FirmwareCounter} (meaning unverified). ");
         Console.WriteLine($"Prepared {data.WidthDots} × {data.HeightDots} dots, {data.Compressed.Length} compressed bytes. Sending one ETIKRA test label…");
@@ -312,16 +321,41 @@ internal static class Program
         response[7] = 0x30;
         response[37] = 0xFF;
         response[38] = 0xFF;
-        response[39] = 0xFF;
+        response[39] = 1;
         response[40] = 12;
         response[41] = 40;
-        response[42] = 2;
+        response[42] = 3;
         BitConverter.TryWriteBytes(response.AsSpan(43, 4), 57u);
 
         var material = BleMaterialReport.Parse(response);
         True(material.HasPlausibleGeometry, "material geometry should validate");
+        True(!material.IsContinuous, "gapped material should be fixed-size");
+        True(material.TryGetE12PrintMaterialCode(out var printCode), "live die-cut raw type should map to a print code");
+        Equal((byte)1, printCode, "die-cut print-buffer material code");
         Equal((byte)12, material.WidthMm, "material width");
         Equal((byte)40, material.HeightMm, "material height");
+    }
+
+    private static void E12ContinuousMaterial()
+    {
+        var response = new byte[47];
+        response[0] = 0x7E;
+        response[1] = 0x5A;
+        response[2] = 43;
+        response[7] = 0x30;
+        response[39] = 0;
+        response[40] = 15;
+        response[41] = 50;
+        response[42] = 0;
+        BitConverter.TryWriteBytes(response.AsSpan(43, 4), 7760u);
+
+        var material = BleMaterialReport.Parse(response);
+        True(material.HasPlausibleGeometry, "continuous material geometry should validate");
+        True(material.IsContinuous, "raw type 0 with no gap should be continuous");
+        True(material.TryGetE12PrintMaterialCode(out var printCode), "continuous raw type should map to a print code");
+        Equal((byte)1, printCode, "continuous print-buffer material code");
+        Equal((byte)15, material.WidthMm, "continuous tape width");
+        True(material.GeometryDescription.Contains("length variable", StringComparison.Ordinal), "continuous device field should not become fixed length");
     }
 
     private static void E12DataFrames()
@@ -351,6 +385,19 @@ internal static class Program
         var rightPixel = new byte[] { 0x01 };
         canvas = SupvanRasterEncoder.BuildPrintheadCanvas(rightPixel, 8, 1, 8);
         Equal((byte)0x01, canvas[0], "source right pixel should map to physical low-dot end");
+    }
+
+    private static void E12ContinuousTapeCenterCrop()
+    {
+        var tapeRow = new byte[15]; // 120 dots = 15 mm at 8 dots/mm.
+        tapeRow[1] = 0x18;          // Source dots 11 (cropped) and 12 (first printable).
+        tapeRow[13] = 0x18;         // Source dots 107 (last printable) and 108 (cropped).
+
+        var canvas = SupvanRasterEncoder.BuildPrintheadCanvas(tapeRow, 120, 1, 96);
+        var expected = new byte[12];
+        expected[0] = 0x01;
+        expected[11] = 0x80;
+        True(canvas.SequenceEqual(expected), "15 mm tape should be center-cropped by 12 dots per edge before head-axis mirroring");
     }
 
     private static void E12LandscapeRotation()

@@ -14,8 +14,8 @@ Etikra is an open-source Windows label designer for SUPVAN and KATASYMBOL therma
 - Guarded direct USB backend for known T50, T80, G, TP76, TP80, TP86, and SP650 product IDs.
 - Native Windows BLE discovery, persistent GATT notification transport, and E12 printing through `FEE7/FEC1`.
 - Read-before-print interrogation for model, firmware, status, RFID material metadata, loaded width/height/gap/type, and dots/mm.
-- A **Use loaded media size** action plus a hard pre-print geometry recheck; the E12's `12 mm head × 40 mm feed` reply becomes a conventional `40 × 12 mm` landscape editor canvas.
-- A live 1-bit thermal-dot preview and dashed E12 print-safe guide. Elements crossing the approximately 1 mm boundary are blocked before any print bytes are sent.
+- A loaded-media action plus a hard pre-print geometry recheck. Fixed stock sets both editor dimensions; continuous stock sets the tape width while preserving the user-selected length.
+- A live 1-bit thermal-dot preview and dashed E12 print-safe guide. The feed-end inset is 1 mm; 15 mm tape is centered over the 12 mm head and therefore has a 1.5 mm tape-edge inset. Elements crossing the applicable boundary are blocked before any print bytes are sent.
 - Printer status/error handling for cover-open, missing/empty labels, ribbon faults, thermal faults, and busy states.
 - Dependency-free executable test harness for barcode, raster, buffer, checksum, model, and LZMA verification.
 
@@ -26,9 +26,11 @@ Etikra is an open-source Windows label designer for SUPVAN and KATASYMBOL therma
 | Mock/file output | Ready | Default and safe without hardware. |
 | USB HID | Experimental | Protocol is implemented; this Windows port has not yet been validated on physical hardware in this repository. |
 | Bluetooth Classic SPP | Researched, not implemented | Public work documents shared commands with different `7E 5A` framing. |
-| Bluetooth LE GATT | Experimental, live E12 path | Discovery, configuration queries, raster framing, and printing are implemented. Live unit `T0188A2602242874` reported model `G15`, firmware `1`, `8 dots/mm`, and loaded `12 × 40 mm` media with a `3 mm` gap. Its firmware can omit the final `BUF_FULL` echo, so Etikra verifies completion through status polling. |
+| Bluetooth LE GATT | Experimental, live E12 path | Discovery, configuration queries, raster framing, and printing are implemented. Live unit `T0188A2602242874` reported model `G15`, firmware `1`, and `8 dots/mm`. Verified loaded-media replies include `12 × 40 mm` die-cut stock with a `3 mm` gap and `15 × L` continuous tape. Its firmware can omit the final `BUF_FULL` echo, so Etikra verifies completion through status polling. |
 
 Known USB product IDs and head profiles come from the [supvan-cups model registry](https://github.com/heeen/supvan-cups/blob/master/data/models.toml). Unknown PID values are displayed but blocked from printing so Etikra never guesses a raster width.
+
+SUPVAN's E12 listing specifies a 12 mm print width, 12–15 mm label widths, and continuous labels with customizable length. Etikra therefore centers the 96-dot head raster on the printer-reported tape width instead of treating a 15 mm roll as a 120-dot head. See the [official E12 product specifications](https://global.supvan.com/en-ca/products/supvan-e12-bluetooth-label-maker-machine-with-4-tapes-support-keyboard-app-with-30-fonts-and-660-icons-rechargeable-inkless-labeler-for-office-home-kitchen-school-organization-white-5).
 
 ## Build and run
 
@@ -56,7 +58,7 @@ dotnet run --project Tests\Etikra.Tests.csproj
 3. Save the editable project as `.etikra` or export a 300 DPI PNG.
 4. Start with **Preview / mock printer**. Etikra writes the rendered output to the local mock-print folder.
 5. For direct USB, connect a supported printer, choose **Refresh USB + Bluetooth**, select it, load the correct media, then print. Etikra shows a confirmation before sending protocol bytes.
-6. For E12 Bluetooth, select the discovered printer and review its live configuration. Choose **Use loaded media size**; Etikra queries the printer again and refuses to send raster data if the design and loaded label disagree.
+6. For E12 Bluetooth, select the discovered printer and review its live configuration. Choose **Use loaded media size**, or **Use loaded tape width (keep length)** for continuous tape. Etikra queries the printer again and refuses to send raster data if the design width across the tape disagrees.
 
 Etikra rotates the landscape editor raster into the printer's feed coordinates and compensates for the E12's reversed printhead-dot order. The editor therefore matches the physical label instead of exposing the printer's portrait wire orientation.
 

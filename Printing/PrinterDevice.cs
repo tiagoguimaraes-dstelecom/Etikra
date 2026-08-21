@@ -26,7 +26,7 @@ public sealed record PrinterDevice(
                                (Profile is not null && DevicePath is not null) ||
                                (Profile is not null && BluetoothAddress is not null &&
                                 BluetoothInformation is { DotsPerMillimeter: not null, Material.HasPlausibleGeometry: true } information &&
-                                information.Material.LabelType <= 3);
+                                information.Material.TryGetE12PrintMaterialCode(out _));
     public string ConnectionDescription => IsMock ? "Safe file output" : IsBluetooth ? "Bluetooth LE" : "USB HID";
 }
 

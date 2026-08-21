@@ -84,16 +84,33 @@ public sealed record BleMaterialReport(
     byte GapMm,
     uint? FirmwareCounter)
 {
+    public bool IsContinuous => LabelType == 0 && GapMm == 0;
+
     public bool HasPlausibleGeometry =>
         WidthMm is >= 4 and <= 100 &&
         HeightMm <= 250 &&
         GapMm <= 30 &&
-        (HeightMm > 0 || GapMm == 0);
+        (IsContinuous || HeightMm > 0);
 
-    public string GeometryDescription => HeightMm == 0
-        ? $"{WidthMm} mm continuous media"
+    public string GeometryDescription => IsContinuous
+        ? $"{WidthMm} mm continuous media (length variable; device field {HeightMm} mm)"
         : $"{WidthMm} × {HeightMm} mm, {GapMm} mm gap";
     public string RawHex => BleProtocol.FormatHex(RawResponse);
+
+    // RETURN_MAT's raw type is not the print-buffer material code. The E12 has
+    // printed successfully with buffer code 1 for raw die-cut type 1, and the
+    // vendor protocol maps continuous tape to buffer code 1 as well.
+    public bool TryGetE12PrintMaterialCode(out byte materialCode)
+    {
+        if (LabelType is 0 or 1)
+        {
+            materialCode = 1;
+            return true;
+        }
+
+        materialCode = 0;
+        return false;
+    }
 
     public static BleMaterialReport Parse(ReadOnlySpan<byte> response)
     {

@@ -34,9 +34,9 @@ internal sealed class SupvanBlePrinterBackend(ulong address, PrinterProfile prof
             throw new InvalidOperationException("The printer did not return coherent loaded-media geometry. No print data was sent.");
         }
 
-        if (material.LabelType > 3)
+        if (!material.TryGetE12PrintMaterialCode(out var printMaterialCode))
         {
-            throw new InvalidOperationException($"The printer returned unsupported material type {material.LabelType}; no print data was sent.");
+            throw new InvalidOperationException($"The printer returned unsupported raw material type {material.LabelType}; no print data was sent.");
         }
 
         if (information.DotsPerMillimeter is not double dotsPerMillimeter)
@@ -45,11 +45,14 @@ internal sealed class SupvanBlePrinterBackend(ulong address, PrinterProfile prof
         }
 
         if (Math.Abs(document.HeightMm - material.WidthMm) > 0.1 ||
-            (material.HeightMm > 0 && Math.Abs(document.WidthMm - material.HeightMm) > 0.1))
+            (!material.IsContinuous && Math.Abs(document.WidthMm - material.HeightMm) > 0.1))
         {
+            var expectedEditorSize = material.IsContinuous
+                ? $"any length × {material.WidthMm} mm"
+                : $"{material.HeightMm} × {material.WidthMm} mm";
             throw new InvalidOperationException(
                 $"The design is {document.SizeDescription}, but the printer reports {material.GeometryDescription} " +
-                $"({material.HeightMm} × {material.WidthMm} mm editor orientation). " +
+                $"({expectedEditorSize} editor orientation). " +
                 "Use the loaded-media size before printing. No print data was sent.");
         }
 
@@ -60,13 +63,16 @@ internal sealed class SupvanBlePrinterBackend(ulong address, PrinterProfile prof
         }
 
         var loadedWidthDots = (int)Math.Round(material.WidthMm * dotsPerMillimeter);
-        if (loadedWidthDots != profile.PrintheadDots)
+        if (loadedWidthDots < profile.PrintheadDots)
         {
             throw new InvalidOperationException(
-                $"The loaded media and returned resolution imply {loadedWidthDots} dots across, but Etikra's verified E12 path is {profile.PrintheadDots} dots. No print data was sent.");
+                $"The loaded media and returned resolution imply only {loadedWidthDots} dots across, but the E12 printhead needs {profile.PrintheadDots} dots. No print data was sent.");
         }
 
-        ValidatePrintableBounds(document, SupvanRasterEncoder.PageMarginDots / dotsPerMillimeter);
+        var feedMarginMm = SupvanRasterEncoder.PageMarginDots / dotsPerMillimeter;
+        var printheadWidthMm = profile.PrintheadDots / dotsPerMillimeter;
+        var transverseMarginMm = Math.Max(feedMarginMm, (material.WidthMm - printheadWidthMm) / 2);
+        ValidatePrintableBounds(document, feedMarginMm, transverseMarginMm);
 
         var liveDpi = (int)Math.Round(dotsPerMillimeter * 25.4);
         var liveProfile = profile with { Dpi = liveDpi };
@@ -76,21 +82,21 @@ internal sealed class SupvanBlePrinterBackend(ulong address, PrinterProfile prof
                 document,
                 liveProfile,
                 density,
-                material.LabelType,
+                printMaterialCode,
                 SupvanRasterOrientation.RotateCounterClockwise),
             cancellationToken);
         await protocol.PrintAsync(data, progress, cancellationToken);
         return $"Printed {data.WidthDots} × {data.HeightDots} dots over Bluetooth on {information.ProtocolDeviceName ?? information.BluetoothName}.";
     }
 
-    private static void ValidatePrintableBounds(LabelDocument document, double marginMm)
+    private static void ValidatePrintableBounds(LabelDocument document, double horizontalMarginMm, double verticalMarginMm)
     {
         var violations = document.Elements
             .Where(element =>
-                element.XMm < marginMm ||
-                element.YMm < marginMm ||
-                element.XMm + element.WidthMm > document.WidthMm - marginMm ||
-                element.YMm + element.HeightMm > document.HeightMm - marginMm)
+                element.XMm < horizontalMarginMm ||
+                element.YMm < verticalMarginMm ||
+                element.XMm + element.WidthMm > document.WidthMm - horizontalMarginMm ||
+                element.YMm + element.HeightMm > document.HeightMm - verticalMarginMm)
             .Select(element => element.Kind.ToString())
             .ToArray();
         if (violations.Length == 0)
@@ -100,7 +106,8 @@ internal sealed class SupvanBlePrinterBackend(ulong address, PrinterProfile prof
 
         throw new InvalidOperationException(
             $"{violations.Length} element{(violations.Length == 1 ? string.Empty : "s")} " +
-            $"({string.Join(", ", violations)}) cross the E12's {marginMm:0.#} mm print-safe boundary. " +
+            $"({string.Join(", ", violations)}) cross the E12's print-safe boundary " +
+            $"({horizontalMarginMm:0.#} mm at the feed ends, {verticalMarginMm:0.#} mm at the tape edges). " +
             "Move or resize them inside the dashed safe-area guide; no print data was sent.");
     }
 }

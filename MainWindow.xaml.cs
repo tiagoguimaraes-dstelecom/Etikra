@@ -642,6 +642,7 @@ public partial class MainWindow : Window
         if (PrinterCombo.SelectedItem is not PrinterDevice device)
         {
             PrinterInformationText.Text = "Select a printer to see its configuration.";
+            UseLoadedMediaButton.Content = "Use loaded media size";
             UseLoadedMediaButton.Visibility = Visibility.Collapsed;
             UpdatePrintRasterPreview();
             return;
@@ -652,6 +653,7 @@ public partial class MainWindow : Window
             PrinterInformationText.Text = device.IsMock
                 ? "Renders a PNG locally and sends nothing to hardware."
                 : $"{device.ConnectionDescription} · {device.Profile?.Dpi} dpi · {device.Profile?.PrintheadDots} dots";
+            UseLoadedMediaButton.Content = "Use loaded media size";
             UseLoadedMediaButton.Visibility = Visibility.Collapsed;
             RenderDesign();
             return;
@@ -669,22 +671,24 @@ public partial class MainWindow : Window
                 : "ready";
         PrinterInformationText.Text =
             $"Model {information.ProtocolDeviceName ?? "unknown"} · FW {information.FirmwareVersion?.ToString() ?? "?"} · revision raw {information.ProtocolRevisionRawHex ?? "?"}\n" +
-            $"Loaded: {material.GeometryDescription} · editor {material.HeightMm} × {material.WidthMm} mm · type code {material.LabelType}\n" +
+            $"Loaded: {material.GeometryDescription} · editor {(material.IsContinuous ? $"variable length × {material.WidthMm} mm" : $"{material.HeightMm} × {material.WidthMm} mm")} · raw type {material.LabelType}\n" +
             $"Firmware counter {material.FirmwareCounter?.ToString() ?? "?"} (meaning unverified) · {resolution} · status {status}";
+        UseLoadedMediaButton.Content = material.IsContinuous
+            ? "Use loaded tape width (keep length)"
+            : "Use loaded media size";
         UseLoadedMediaButton.Visibility = material.HasPlausibleGeometry ? Visibility.Visible : Visibility.Collapsed;
         RenderDesign();
     }
 
     private void AddPrintSafeAreaGuide()
     {
-        if (PrinterCombo.SelectedItem is not PrinterDevice { BluetoothInformation.DotsPerMillimeter: double dotsPerMillimeter })
+        if (GetPrintSafeMargins() is not { } margins)
         {
             return;
         }
 
-        var marginMm = SupvanRasterEncoder.PageMarginDots / dotsPerMillimeter;
-        var width = Math.Max(0, (_document.WidthMm - marginMm * 2) * PreviewPixelsPerMm);
-        var height = Math.Max(0, (_document.HeightMm - marginMm * 2) * PreviewPixelsPerMm);
+        var width = Math.Max(0, (_document.WidthMm - margins.HorizontalMm * 2) * PreviewPixelsPerMm);
+        var height = Math.Max(0, (_document.HeightMm - margins.VerticalMm * 2) * PreviewPixelsPerMm);
         var guide = new Rectangle
         {
             Width = width,
@@ -693,12 +697,29 @@ public partial class MainWindow : Window
             StrokeThickness = 1,
             StrokeDashArray = [4, 3],
             IsHitTestVisible = false,
-            ToolTip = $"E12 print-safe boundary ({marginMm:0.#} mm inset)"
+            ToolTip = $"E12 print-safe boundary ({margins.HorizontalMm:0.#} mm feed ends, {margins.VerticalMm:0.#} mm tape edges)"
         };
-        Canvas.SetLeft(guide, marginMm * PreviewPixelsPerMm);
-        Canvas.SetTop(guide, marginMm * PreviewPixelsPerMm);
+        Canvas.SetLeft(guide, margins.HorizontalMm * PreviewPixelsPerMm);
+        Canvas.SetTop(guide, margins.VerticalMm * PreviewPixelsPerMm);
         Panel.SetZIndex(guide, int.MaxValue);
         DesignCanvas.Children.Add(guide);
+    }
+
+    private (double HorizontalMm, double VerticalMm)? GetPrintSafeMargins()
+    {
+        if (PrinterCombo.SelectedItem is not PrinterDevice
+            {
+                Profile: { } profile,
+                BluetoothInformation: { DotsPerMillimeter: double dotsPerMillimeter } information
+            })
+        {
+            return null;
+        }
+
+        var feedMarginMm = SupvanRasterEncoder.PageMarginDots / dotsPerMillimeter;
+        var printheadWidthMm = profile.PrintheadDots / dotsPerMillimeter;
+        var tapeEdgeMarginMm = Math.Max(feedMarginMm, (information.Material.WidthMm - printheadWidthMm) / 2);
+        return (feedMarginMm, tapeEdgeMarginMm);
     }
 
     private void UpdatePrintRasterPreview()
@@ -714,9 +735,17 @@ public partial class MainWindow : Window
                 ? (int)Math.Round(liveDpi)
                 : (PrinterCombo.SelectedItem as PrinterDevice)?.Profile?.Dpi ?? 203;
             PrintRasterPreview.Source = LabelRenderer.RenderMonochromePreview(_document, dpi);
-            PrintRasterPreviewCaption.Text = PrinterCombo.SelectedItem is PrinterDevice { BluetoothInformation.DotsPerMillimeter: double dotsPerMillimeter }
-                ? $"Exact {dotsPerMillimeter:0.##} dots/mm threshold preview. Keep artwork inside the dashed {SupvanRasterEncoder.PageMarginDots / dotsPerMillimeter:0.#} mm safe area."
-                : $"Monochrome {dpi} dpi threshold preview.";
+            if (PrinterCombo.SelectedItem is PrinterDevice { BluetoothInformation.DotsPerMillimeter: double dotsPerMillimeter } &&
+                GetPrintSafeMargins() is { } margins)
+            {
+                PrintRasterPreviewCaption.Text =
+                    $"Exact {dotsPerMillimeter:0.##} dots/mm threshold preview. Dashed safe area: " +
+                    $"{margins.HorizontalMm:0.#} mm feed ends, {margins.VerticalMm:0.#} mm tape edges.";
+            }
+            else
+            {
+                PrintRasterPreviewCaption.Text = $"Monochrome {dpi} dpi threshold preview.";
+            }
         }
         catch
         {
@@ -732,7 +761,7 @@ public partial class MainWindow : Window
             return;
         }
 
-        if (material.HeightMm > 0)
+        if (!material.IsContinuous)
         {
             _document.WidthMm = material.HeightMm;
         }
@@ -751,7 +780,9 @@ public partial class MainWindow : Window
         MarkDirty();
         RenderDesign();
         UpdateInspector();
-        StatusText.Text = $"Design resized to {material.HeightMm} × {material.WidthMm} mm using printer-reported {material.GeometryDescription}.";
+        StatusText.Text = material.IsContinuous
+            ? $"Tape width set to {material.WidthMm} mm; design length remains {_document.WidthMm:0.##} mm."
+            : $"Design resized to {material.HeightMm} × {material.WidthMm} mm using printer-reported {material.GeometryDescription}.";
     }
 
     private async void Print_Click(object sender, RoutedEventArgs e)
