@@ -1,3 +1,4 @@
+using Etikra.Models;
 using Etikra.Printing;
 using Etikra.Printing.Bluetooth;
 using Etikra.Services;
@@ -20,6 +21,16 @@ internal static class Program
             return await ProbeBluetoothAsync(args[1]);
         }
 
+        if (args.Length == 2 && args[0].Equals("--ble-info", StringComparison.OrdinalIgnoreCase))
+        {
+            return await ReadBluetoothInformationAsync(args[1]);
+        }
+
+        if (args.Length == 2 && args[0].Equals("--ble-test-print", StringComparison.OrdinalIgnoreCase))
+        {
+            return await PrintBluetoothTestAsync(args[1]);
+        }
+
         var tests = new (string Name, Action Run)[]
         {
             ("Code 128-B checksum", Code128Checksum),
@@ -27,7 +38,10 @@ internal static class Program
             ("LZMA firmware parameters and round trip", LzmaRoundTrip),
             ("End-to-end starter-label raster", StarterLabelRaster),
             ("Known USB model registry", ModelRegistry),
-            ("E12 BLE advertisement signature", E12AdvertisementSignature)
+            ("E12 BLE advertisement signature", E12AdvertisementSignature),
+            ("E12 BLE command frame", E12CommandFrame),
+            ("E12 material layout validation", E12MaterialLayout),
+            ("E12 BLE raster data framing", E12DataFrames)
         };
 
         try
@@ -86,6 +100,116 @@ internal static class Program
         }
 
         Console.WriteLine(result.HasKnownE12Path ? "Known E12 FEE7/FEC1 path confirmed." : "Known E12 FEE7/FEC1 path not found.");
+        return 0;
+    }
+
+    private static async Task<int> ReadBluetoothInformationAsync(string addressText)
+    {
+        if (!BleDiscovery.TryParseAddress(addressText, out var address))
+        {
+            Console.Error.WriteLine("Invalid Bluetooth address.");
+            return 2;
+        }
+
+        Console.WriteLine($"Connecting to {BleDiscovery.FormatAddress(address)} and enabling notifications…");
+        await using var protocol = await BleProtocol.ConnectAsync(address);
+        var information = await protocol.ReadInformationAsync();
+        Console.WriteLine($"Bluetooth name: {information.BluetoothName}");
+        Console.WriteLine($"Protocol name: {information.ProtocolDeviceName ?? "not returned"}");
+        Console.WriteLine($"Protocol revision: {information.ProtocolRevision ?? "not returned"}");
+        Console.WriteLine($"Protocol revision raw: {information.ProtocolRevisionRawHex ?? "not returned"}");
+        Console.WriteLine($"Firmware byte: {(information.FirmwareVersion is byte firmware ? $"0x{firmware:X2} ({firmware})" : "not returned")}");
+        Console.WriteLine($"Resolution: {(information.DotsPerMillimeter is double dpmm ? $"{dpmm:0.##} dots/mm ({information.Dpi:0.#} dpi)" : "not returned")}");
+        Console.WriteLine($"ATT MTU: {information.AttMtu}; command writes: {information.CommandWriteOption}");
+        Console.WriteLine($"Status: {information.Status}");
+        Console.WriteLine($"Errors: {(information.Status.Errors.Count == 0 ? "none" : string.Join(", ", information.Status.Errors))}");
+        Console.WriteLine($"Material: {information.Material.GeometryDescription}; type code={information.Material.LabelType}; " +
+                          $"firmware counter={(information.Material.FirmwareCounter?.ToString() ?? "not exposed")} (meaning unverified); " +
+                          $"label SN={information.Material.LabelSerial}; RFID UID={information.Material.RfidUid}; " +
+                          $"plausible={information.Material.HasPlausibleGeometry}");
+        Console.WriteLine(information.Material.HasPlausibleGeometry
+            ? $"Confirmed material geometry: {information.Material.GeometryDescription}."
+            : "Material geometry is ambiguous or invalid; printing remains blocked.");
+        foreach (var (command, response) in information.RawResponses.OrderBy(item => item.Key))
+        {
+            Console.WriteLine($"RX 0x{command:X2}: {BleProtocol.FormatHex(response)}");
+        }
+
+        return 0;
+    }
+
+    private static async Task<int> PrintBluetoothTestAsync(string addressText)
+    {
+        if (!BleDiscovery.TryParseAddress(addressText, out var address))
+        {
+            Console.Error.WriteLine("Invalid Bluetooth address.");
+            return 2;
+        }
+
+        Console.WriteLine("Connecting and re-reading media before test print…");
+        await using var protocol = await BleProtocol.ConnectAsync(address);
+        var information = await protocol.ReadInformationAsync();
+        var material = information.Material;
+        if (!material.HasPlausibleGeometry || material.HeightMm == 0)
+        {
+            throw new InvalidOperationException("A coherent die-cut label size was not returned; no print data was sent.");
+        }
+
+        if (information.DotsPerMillimeter is not double dotsPerMillimeter)
+        {
+            throw new InvalidOperationException("The printer did not return its resolution; no print data was sent.");
+        }
+
+        var printheadDots = (int)Math.Round(material.WidthMm * dotsPerMillimeter);
+        if (printheadDots != 96)
+        {
+            throw new InvalidOperationException(
+                $"The returned media/resolution imply {printheadDots} dots across, not the live-tested E12 width of 96; no print data was sent.");
+        }
+
+        if (material.LabelType > 3 || information.Status.Errors.Count > 0)
+        {
+            throw new InvalidOperationException("The returned material type or printer state is not safe for the verified test path; no print data was sent.");
+        }
+
+        var document = new LabelDocument
+        {
+            Name = "Etikra Bluetooth test",
+            WidthMm = material.WidthMm,
+            HeightMm = material.HeightMm
+        };
+        document.Elements.Add(new LabelElement
+        {
+            Kind = LabelElementKind.Rectangle,
+            XMm = 0.75,
+            YMm = 12,
+            WidthMm = material.WidthMm - 1.5,
+            HeightMm = 16,
+            StrokeThicknessMm = 0.3
+        });
+        document.Elements.Add(new LabelElement
+        {
+            Kind = LabelElementKind.Text,
+            XMm = 1,
+            YMm = 16,
+            WidthMm = material.WidthMm - 2,
+            HeightMm = 8,
+            Content = "ETIKRA",
+            FontSizePt = 8,
+            Bold = true
+        });
+
+        var profile = PrinterProfiles.E12 with
+        {
+            Dpi = (int)Math.Round(dotsPerMillimeter * 25.4),
+            PrintheadDots = printheadDots
+        };
+        var data = SupvanRasterEncoder.Encode(document, profile, density: 4, materialType: material.LabelType);
+        Console.WriteLine($"Printer reports {material.GeometryDescription}, type {material.LabelType}, {dotsPerMillimeter:0.##} dots/mm, firmware counter {material.FirmwareCounter} (meaning unverified). ");
+        Console.WriteLine($"Prepared {data.WidthDots} × {data.HeightDots} dots, {data.Compressed.Length} compressed bytes. Sending one ETIKRA test label…");
+        var progress = new Progress<string>(Console.WriteLine);
+        await protocol.PrintAsync(data, progress, CancellationToken.None);
+        Console.WriteLine("Test print completed according to printer status.");
         return 0;
     }
 
@@ -158,6 +282,55 @@ internal static class Program
             -50,
             []);
         True(advertisement.LooksLikeE12, "SUPVAN OUI and T-series advertisement should be recognized");
+    }
+
+    private static void E12CommandFrame()
+    {
+        var command = BleProtocol.BuildCommand(0x30, 0x1234, 0x5678);
+        Equal(16, command.Length, "command length");
+        True(command[..8].SequenceEqual(new byte[] { 0x7E, 0x5A, 0x0C, 0, 0x10, 0x01, 0xAA, 0x30 }), "command prefix");
+        Equal((ushort)0x1234, BitConverter.ToUInt16(command, 12), "little-endian first parameter");
+        Equal((ushort)0x5678, BitConverter.ToUInt16(command, 14), "little-endian second parameter");
+        Equal((ushort)0x0115, BitConverter.ToUInt16(command, 8), "command checksum");
+    }
+
+    private static void E12MaterialLayout()
+    {
+        var response = new byte[47];
+        response[0] = 0x7E;
+        response[1] = 0x5A;
+        response[2] = 43;
+        response[7] = 0x30;
+        response[37] = 0xFF;
+        response[38] = 0xFF;
+        response[39] = 0xFF;
+        response[40] = 12;
+        response[41] = 40;
+        response[42] = 2;
+        BitConverter.TryWriteBytes(response.AsSpan(43, 4), 57u);
+
+        var material = BleMaterialReport.Parse(response);
+        True(material.HasPlausibleGeometry, "material geometry should validate");
+        Equal((byte)12, material.WidthMm, "material width");
+        Equal((byte)40, material.HeightMm, "material height");
+    }
+
+    private static void E12DataFrames()
+    {
+        var compressed = Enumerable.Range(0, 501).Select(value => (byte)value).ToArray();
+        var frames = BleProtocol.BuildDataFrames(compressed);
+        Equal(2, frames.Count, "BLE data frame count");
+        Equal(512, frames[0].Length, "BLE data frame size");
+        True(frames[0][..6].SequenceEqual(new byte[] { 0x7E, 0x5A, 0xFC, 0x01, 0x10, 0x02 }), "BLE outer header");
+        Equal((byte)0xAA, frames[0][6], "BLE inner magic 1");
+        Equal((byte)0xBB, frames[0][7], "BLE inner magic 2");
+        Equal((byte)0, frames[0][10], "first frame index");
+        Equal((byte)2, frames[0][11], "first frame total");
+        Equal((ushort)frames[0].AsSpan(10).ToArray().Sum(value => value), BitConverter.ToUInt16(frames[0], 8), "BLE inner checksum");
+        Equal((byte)0, frames[0][12], "first compressed byte");
+        Equal((byte)1, frames[1][10], "second frame index");
+        Equal((byte)2, frames[1][11], "second frame total");
+        Equal(compressed[500], frames[1][12], "second frame payload");
     }
 
     private static void Equal<T>(T expected, T actual, string label)

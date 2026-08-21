@@ -1,6 +1,6 @@
 # Etikra
 
-Etikra is an open-source Windows label designer for SUPVAN and KATASYMBOL thermal label printers. It is a native C#/.NET 10 WPF application with an offline editor, a safe mock printer, print-ready PNG export, and an experimental direct USB HID backend.
+Etikra is an open-source Windows label designer for SUPVAN and KATASYMBOL thermal label printers. It is a native C#/.NET 10 WPF application with an offline editor, a safe mock printer, print-ready PNG export, an experimental direct USB HID backend, and a live-tested E12 Bluetooth LE backend.
 
 > Etikra is an independent community project. It is not affiliated with or endorsed by SUPVAN or KATASYMBOL. Direct printing is based on public reverse-engineering work and needs testing on more physical printers.
 
@@ -12,6 +12,9 @@ Etikra is an open-source Windows label designer for SUPVAN and KATASYMBOL therma
 - Mock printing to `%LOCALAPPDATA%\Etikra\Mock Prints` without printer hardware.
 - Windows USB HID discovery restricted to SUPVAN vendor ID `1820`.
 - Guarded direct USB backend for known T50, T80, G, TP76, TP80, TP86, and SP650 product IDs.
+- Native Windows BLE discovery, persistent GATT notification transport, and E12 printing through `FEE7/FEC1`.
+- Read-before-print interrogation for model, firmware, status, RFID material metadata, loaded width/height/gap/type, and dots/mm.
+- A **Use loaded media size** action plus a hard pre-print geometry recheck; Bluetooth printing is blocked when the returned material data is incoherent or does not match the design.
 - Printer status/error handling for cover-open, missing/empty labels, ribbon faults, thermal faults, and busy states.
 - Dependency-free executable test harness for barcode, raster, buffer, checksum, model, and LZMA verification.
 
@@ -22,7 +25,7 @@ Etikra is an open-source Windows label designer for SUPVAN and KATASYMBOL therma
 | Mock/file output | Ready | Default and safe without hardware. |
 | USB HID | Experimental | Protocol is implemented; this Windows port has not yet been validated on physical hardware in this repository. |
 | Bluetooth Classic SPP | Researched, not implemented | Public work documents shared commands with different `7E 5A` framing. |
-| Bluetooth LE GATT | Discovery and probe ready | Active Windows scanning and read-only GATT service probing are implemented; print writes are not enabled yet. An available E12-class unit has confirmed the `FEE7/FEC1` path. |
+| Bluetooth LE GATT | Experimental, live E12 path | Discovery, configuration queries, raster framing, and printing are implemented. Live unit `T0188A2602242874` reported model `G15`, firmware `1`, `8 dots/mm`, and loaded `12 × 40 mm` media with a `3 mm` gap. Its firmware can omit the final `BUF_FULL` echo, so Etikra verifies completion through status polling. |
 
 Known USB product IDs and head profiles come from the [supvan-cups model registry](https://github.com/heeen/supvan-cups/blob/master/data/models.toml). Unknown PID values are displayed but blocked from printing so Etikra never guesses a raster width.
 
@@ -47,11 +50,12 @@ dotnet run --project Tests\Etikra.Tests.csproj
 
 ## Using Etikra
 
-1. Set the physical label width and height in millimetres.
+1. Set the physical label width and height in millimetres, or let a compatible Bluetooth printer report them.
 2. Add elements from the left palette. Drag them on the canvas or edit exact values in the inspector.
 3. Save the editable project as `.etikra` or export a 300 DPI PNG.
 4. Start with **Preview / mock printer**. Etikra writes the rendered output to the local mock-print folder.
-5. For direct USB, connect a supported printer, choose **Refresh USB printers**, select it, load the correct media, then print. Etikra shows a confirmation before sending protocol bytes.
+5. For direct USB, connect a supported printer, choose **Refresh USB + Bluetooth**, select it, load the correct media, then print. Etikra shows a confirmation before sending protocol bytes.
+6. For E12 Bluetooth, select the discovered printer and review its live configuration. Choose **Use loaded media size**; Etikra queries the printer again and refuses to send raster data if the design and loaded label disagree.
 
 Holding Ctrl while dragging disables the normal 0.5 mm snap. Arrow keys nudge by 0.5 mm; Shift+arrow nudges by 1 mm. Ctrl+D duplicates and Delete removes the selected element.
 
@@ -64,7 +68,7 @@ The main source is [`heeen/supvan-cups`](https://github.com/heeen/supvan-cups), 
 - Column/feed-major LSB-first raster rows inside checksummed 4096-byte print buffers.
 - LZMA1-alone compression with an 8192-byte dictionary, `lc=3`, `lp=0`, `pb=2`, and an exact uncompressed-size header.
 
-The separate [`katasymbol-e12-lab`](https://github.com/eteriall/katasymbol-e12-lab) project is useful evidence for E12 BLE work. Etikra now actively discovers BLE advertisements and can connect read-only to enumerate GATT services; write/print operations remain intentionally disabled until packet timing is validated.
+The separate [`katasymbol-e12-lab`](https://github.com/eteriall/katasymbol-e12-lab) project supplies the E12 BLE service map, 16-byte command frames, 512-byte compressed raster frames, and tested timing Etikra follows. Etikra additionally verifies loaded media and resolution from live replies instead of using the reference tool's default label dimensions.
 
 See [docs/PROTOCOL.md](docs/PROTOCOL.md) for Etikra's implementation notes and verification boundary.
 

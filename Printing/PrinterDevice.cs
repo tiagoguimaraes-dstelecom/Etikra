@@ -1,3 +1,5 @@
+using Etikra.Printing.Bluetooth;
+
 namespace Etikra.Printing;
 
 public sealed record PrinterProfile(
@@ -15,15 +17,23 @@ public sealed record PrinterDevice(
     string DisplayName,
     PrinterProfile? Profile,
     string? DevicePath,
-    bool IsMock = false)
+    bool IsMock = false,
+    ulong? BluetoothAddress = null,
+    BlePrinterInformation? BluetoothInformation = null)
 {
-    public bool IsSupported => IsMock || Profile is not null;
-    public string ConnectionDescription => IsMock ? "Safe file output" : "USB HID";
+    public bool IsBluetooth => BluetoothAddress is not null;
+    public bool IsSupported => IsMock ||
+                               (Profile is not null && DevicePath is not null) ||
+                               (Profile is not null && BluetoothAddress is not null &&
+                                BluetoothInformation is { DotsPerMillimeter: not null, Material.HasPlausibleGeometry: true } information &&
+                                information.Material.LabelType <= 3);
+    public string ConnectionDescription => IsMock ? "Safe file output" : IsBluetooth ? "Bluetooth LE" : "USB HID";
 }
 
 public static class PrinterProfiles
 {
     public const ushort SupvanVendorId = 0x1820;
+    public static PrinterProfile E12 { get; } = new("E12", 0, 203, 96, "E12");
 
     private static readonly IReadOnlyDictionary<ushort, PrinterProfile> ByProductId =
         new Dictionary<ushort, PrinterProfile>

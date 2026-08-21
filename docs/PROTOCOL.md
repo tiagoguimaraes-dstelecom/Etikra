@@ -127,10 +127,48 @@ Etikra currently records these known USB families:
 
 The exact PID map is in `Printing/PrinterDevice.cs` and is derived from the upstream [`models.toml`](https://github.com/heeen/supvan-cups/blob/master/data/models.toml).
 
-## Bluetooth status and research boundary
+## Bluetooth LE transport
 
 The public T-series research describes Bluetooth Classic SPP commands with `7E 5A` framing, 16-byte commands, little-endian parameters, and framed 512-byte data packets. It also records several BLE GATT service/characteristic patterns used by E-series hardware. [`katasymbol-e12-lab`](https://github.com/eteriall/katasymbol-e12-lab) provides an additional independent E12 reference.
 
-Etikra now implements native Windows BLE advertisement scanning and a read-only GATT probe. A live E12-class hardware probe confirmed service `FEE7`, characteristic `FEC1`, and the `WriteWithoutResponse, Notify` properties described by the independent reference. The scanner also recognizes the observed SUPVAN `A4:93:40` OUI plus `T`/`G`/`D` serial-style advertisement names.
+Etikra implements native Windows BLE advertisement scanning, a persistent GATT connection, notifications, command/reply correlation, and raster transfer. A live E12-class hardware probe confirmed service `FEE7`, characteristic `FEC1`, and `WriteWithoutResponse, Notify`. Windows negotiated an ATT MTU of 251. The scanner also recognizes the observed SUPVAN `A4:93:40` OUI plus `T`/`G`/`D` serial-style advertisement names.
 
-Print writes remain disabled. Before enabling them, add captured-frame fixtures, notification/ack tests, negotiated-payload fragmentation, cancellation behavior, device-name/model gating, and a short physical test label with explicit operator confirmation.
+BLE commands use a 16-byte `7E 5A` request with little-endian parameters and a checksum over bytes 10–15. Replies echo the command at offset 7. Etikra enables notifications before its first command and supports the three published service paths: `FEE7/FEC1`, `E0FF/(FFE1 notify, FFE9 write)`, and `FF00/(FF01 notify, FF02 write)`.
+
+### Live E12 configuration query
+
+Etikra sends read-only `CHECK_DEVICE (12)`, `INQUIRY_STA (11)`, `RD_DEV_NAME (16)`, `READ_REV (17)`, `RD_LAB_DPI (22)`, `RETURN_MAT (30)`, and `READ_FWVER (C5)` queries. On the available unit, those replies established:
+
+```text
+Bluetooth name       T0188A2602242874
+protocol model       G15
+firmware byte        01
+resolution field     0320 little-endian = 800 hundredths = 8 dots/mm
+material type        1
+material width       12 mm
+material height      40 mm
+material gap         3 mm
+label SN             25004
+```
+
+The common material payload starts at response byte 22: RFID UID (7 bytes), RFID code (8), label SN (u16), material type (u8), width/height/gap (three u8 values), and a four-byte firmware counter. Geometry is accepted only inside conservative ranges and is queried again immediately before a print. A die-cut design must match returned width and height within 0.1 mm. Continuous media (height zero) requires a width match while document height remains the requested feed length.
+
+The four-byte field after the gap is called `remaining` by public implementations. It changed from 204 to 0 during a single live transfer, which is not a credible remaining-label decrement, so Etikra exposes it only as an unverified firmware counter and never uses it for safety decisions.
+
+### BLE raster transfer
+
+The E12 path renders at the returned 8 dots/mm (203.2 dpi) and uses the verified 96-dot head width. The printer-returned material type populates the two-bit material field in every 4096-byte print buffer; Etikra does not hard-code that field for Bluetooth jobs.
+
+Compressed data is split into 500-byte payloads inside checksummed 506-byte packets, then wrapped as 512-byte `7E 5A` frames. Each frame is fragmented into conservative 180-byte GATT writes. The state machine is:
+
+```text
+CHECK_DEVICE → idle status → START_PRINT → printing/buffer-ready status
+→ NEXT_ZIPPEDBULK(block_size=512, frame_count)
+→ 512-byte data frames
+→ BUF_FULL(compressed length, speed)
+→ status polling until idle
+```
+
+The live firmware accepted the raster transfer but omitted the `BUF_FULL (10)` echo. Since that opcode is also documented as flow control/output-only, Etikra treats only that missing echo as optional and then uses `INQUIRY_STA` as the completion authority. Any other timeout or decoded printer error triggers a best-effort `STOP_PRINT`.
+
+Firmware update and RFID-write opcodes remain deliberately absent.

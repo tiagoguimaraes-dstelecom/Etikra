@@ -86,7 +86,7 @@
                     <Border Grid.Row="2" Background="#F0EDFF" CornerRadius="8" Padding="11">
                         <StackPanel>
                             <TextBlock Text="RESEARCH BACKEND" Foreground="{StaticResource AccentBrush}" FontFamily="Segoe UI Semibold" FontSize="10" />
-                            <TextBlock Text="Verified USB framing for SUPVAN / KATASYMBOL families. Bluetooth is kept isolated until hardware validation."
+                            <TextBlock Text="Verified USB framing plus live-tested E12 Bluetooth discovery, media interrogation, and printing."
                                        TextWrapping="Wrap" FontSize="11" Margin="0,4,0,0" Foreground="#51457F" />
                         </StackPanel>
                     </Border>
@@ -110,8 +110,14 @@
                     <StackPanel Margin="18">
                         <TextBlock Text="PRINT" Style="{StaticResource SectionTitle}" />
                         <TextBlock Text="Printer" Style="{StaticResource FieldLabel}" />
-                        <ComboBox x:Name="PrinterCombo" DisplayMemberPath="DisplayName" MinHeight="34" />
-                        <Button x:Name="RefreshPrintersButton" Content="Refresh USB printers" Margin="0,8,0,0" Click="RefreshPrinters_Click" />
+                        <ComboBox x:Name="PrinterCombo" DisplayMemberPath="DisplayName" MinHeight="34" SelectionChanged="PrinterCombo_SelectionChanged" />
+                        <Button x:Name="RefreshPrintersButton" Content="Refresh USB + Bluetooth" Margin="0,8,0,0" Click="RefreshPrinters_Click" />
+                        <Border Background="#F1F2F5" CornerRadius="7" Padding="10" Margin="0,8,0,0">
+                            <StackPanel>
+                                <TextBlock x:Name="PrinterInformationText" Text="Select a printer to see its configuration." TextWrapping="Wrap" Foreground="{StaticResource MutedBrush}" FontSize="11" />
+                                <Button x:Name="UseLoadedMediaButton" Content="Use loaded media size" Margin="0,8,0,0" Click="UseLoadedMedia_Click" Visibility="Collapsed" />
+                            </StackPanel>
+                        </Border>
                         <TextBlock Text="Density" Style="{StaticResource FieldLabel}" Margin="0,13,0,3" />
                         <Grid>
                             <Grid.ColumnDefinitions><ColumnDefinition /><ColumnDefinition Width="35" /></Grid.ColumnDefinitions>

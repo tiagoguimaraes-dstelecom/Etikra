@@ -19,14 +19,19 @@ public static class SupvanRasterEncoder
     private const int MaxImageBytes = 4074;
     private const int MarginDots = 8;
 
-    public static SupvanPrintData Encode(LabelDocument document, PrinterProfile profile, byte density)
+    public static SupvanPrintData Encode(LabelDocument document, PrinterProfile profile, byte density, byte materialType = 1)
     {
+        if (materialType > 3)
+        {
+            throw new ArgumentOutOfRangeException(nameof(materialType), "The verified print-buffer material field is two bits wide.");
+        }
+
         density = Math.Min((byte)15, density);
         var bitmap = LabelRenderer.Render(document, profile.Dpi);
         var rowMajor = LabelRenderer.ToOneBitRows(bitmap);
         var canvas = BuildPrintheadCanvas(rowMajor, bitmap.PixelWidth, bitmap.PixelHeight, profile.PrintheadDots);
         var perLineBytes = profile.PrintheadDots / 8;
-        var buffers = BuildPrintBuffers(canvas, perLineBytes, bitmap.PixelHeight, density);
+        var buffers = BuildPrintBuffers(canvas, perLineBytes, bitmap.PixelHeight, density, materialType);
         var raw = new byte[buffers.Count * PrintBufferSize];
         for (var i = 0; i < buffers.Count; i++)
         {
@@ -71,7 +76,7 @@ public static class SupvanRasterEncoder
         return output;
     }
 
-    internal static IReadOnlyList<byte[]> BuildPrintBuffers(byte[] image, int perLineBytes, int totalColumns, byte density)
+    internal static IReadOnlyList<byte[]> BuildPrintBuffers(byte[] image, int perLineBytes, int totalColumns, byte density, byte materialType = 1)
     {
         if (perLineBytes is <= 0 or > byte.MaxValue)
         {
@@ -94,7 +99,7 @@ public static class SupvanRasterEncoder
             var last = currentColumn + columns >= imageColumns;
             var start = (MarginDots + currentColumn) * perLineBytes;
             var dataLength = columns * perLineBytes;
-            var buffer = BuildPrintBuffer(image.AsSpan(start, dataLength), (byte)perLineBytes, (ushort)columns, first, last, density);
+            var buffer = BuildPrintBuffer(image.AsSpan(start, dataLength), (byte)perLineBytes, (ushort)columns, first, last, density, materialType);
             result.Add(buffer);
             currentColumn += columns;
         }
@@ -108,11 +113,12 @@ public static class SupvanRasterEncoder
         ushort columns,
         bool first,
         bool last,
-        byte density)
+        byte density,
+        byte materialType = 1)
     {
         var buffer = new byte[PrintBufferSize];
         buffer[2] = (byte)((first ? 0x02 : 0) | (last ? 0x04 | 0x08 : 0));
-        buffer[3] = (byte)(0x40 | (Math.Min((byte)15, density) << 2)); // material=1, Nodu=density
+        buffer[3] = (byte)(((materialType & 0x03) << 6) | (Math.Min((byte)15, density) << 2));
         BitConverter.TryWriteBytes(buffer.AsSpan(4, 2), columns);
         buffer[6] = perLineBytes;
         BitConverter.TryWriteBytes(buffer.AsSpan(8, 2), (ushort)MarginDots);

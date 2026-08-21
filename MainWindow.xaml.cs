@@ -10,6 +10,7 @@ using System.Windows.Media.Imaging;
 using System.Windows.Shapes;
 using Etikra.Models;
 using Etikra.Printing;
+using Etikra.Printing.Bluetooth;
 using Etikra.Services;
 
 namespace Etikra;
@@ -575,19 +576,50 @@ public partial class MainWindow : Window
     private async Task RefreshPrintersAsync()
     {
         RefreshPrintersButton.IsEnabled = false;
-        StatusText.Text = "Searching for SUPVAN USB printers…";
+        UseLoadedMediaButton.IsEnabled = false;
+        StatusText.Text = "Searching for SUPVAN USB and Bluetooth printers…";
         var selectedId = (PrinterCombo.SelectedItem as PrinterDevice)?.Id;
         try
         {
-            var devices = await Task.Run(UsbHidDiscovery.FindSupvanPrinters);
+            var usbTask = Task.Run(UsbHidDiscovery.FindSupvanPrinters);
+            var bleTask = BleDiscovery.ScanAsync(TimeSpan.FromSeconds(5));
+            await Task.WhenAll(usbTask, bleTask);
+            var usbDevices = await usbTask;
+            var bleAdvertisements = (await bleTask).Where(item => item.LooksLikeE12).ToArray();
             var items = new List<PrinterDevice>
             {
                 new("mock", "Preview / mock printer", null, null, true)
             };
-            items.AddRange(devices);
+            items.AddRange(usbDevices);
+            foreach (var advertisement in bleAdvertisements)
+            {
+                try
+                {
+                    await using var protocol = await BleProtocol.ConnectAsync(advertisement.Address);
+                    var information = await protocol.ReadInformationAsync();
+                    var displayName = information.ProtocolDeviceName is { Length: > 0 } model
+                        ? $"{model} / E12 · Bluetooth · {information.Material.GeometryDescription}"
+                        : $"{information.BluetoothName} · Bluetooth · {information.Material.GeometryDescription}";
+                    items.Add(new PrinterDevice(
+                        $"ble:{advertisement.Address:X12}",
+                        displayName,
+                        PrinterProfiles.E12,
+                        null,
+                        BluetoothAddress: advertisement.Address,
+                        BluetoothInformation: information));
+                }
+                catch (Exception exception)
+                {
+                    StatusText.Text = $"Found Bluetooth candidate {advertisement.Name}, but configuration query failed: {exception.Message}";
+                }
+            }
+
             PrinterCombo.ItemsSource = items;
             PrinterCombo.SelectedItem = items.FirstOrDefault(item => item.Id == selectedId) ?? items[0];
-            StatusText.Text = devices.Count == 0 ? "No SUPVAN USB printer found; mock output is ready." : $"Found {devices.Count} SUPVAN USB printer{(devices.Count == 1 ? string.Empty : "s")}.";
+            var realCount = usbDevices.Count + items.Count(item => item.IsBluetooth);
+            StatusText.Text = realCount == 0
+                ? "No SUPVAN printer found; mock output is ready."
+                : $"Found {realCount} SUPVAN printer{(realCount == 1 ? string.Empty : "s")}.";
         }
         catch (Exception exception)
         {
@@ -599,7 +631,66 @@ public partial class MainWindow : Window
         finally
         {
             RefreshPrintersButton.IsEnabled = true;
+            UseLoadedMediaButton.IsEnabled = true;
         }
+    }
+
+    private void PrinterCombo_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (PrinterCombo.SelectedItem is not PrinterDevice device)
+        {
+            PrinterInformationText.Text = "Select a printer to see its configuration.";
+            UseLoadedMediaButton.Visibility = Visibility.Collapsed;
+            return;
+        }
+
+        if (device.BluetoothInformation is not { } information)
+        {
+            PrinterInformationText.Text = device.IsMock
+                ? "Renders a PNG locally and sends nothing to hardware."
+                : $"{device.ConnectionDescription} · {device.Profile?.Dpi} dpi · {device.Profile?.PrintheadDots} dots";
+            UseLoadedMediaButton.Visibility = Visibility.Collapsed;
+            return;
+        }
+
+        var material = information.Material;
+        var resolution = information.DotsPerMillimeter is double dpmm
+            ? $"{dpmm:0.##} dots/mm ({information.Dpi:0.#} dpi)"
+            : "resolution not returned";
+        PrinterInformationText.Text =
+            $"Model {information.ProtocolDeviceName ?? "unknown"} · FW {information.FirmwareVersion?.ToString() ?? "?"} · revision raw {information.ProtocolRevisionRawHex ?? "?"}\n" +
+            $"Loaded: {material.GeometryDescription} · type code {material.LabelType}\n" +
+            $"Firmware counter {material.FirmwareCounter?.ToString() ?? "?"} (meaning unverified) · {resolution} · status {(information.Status.Errors.Count == 0 ? "ready" : string.Join(", ", information.Status.Errors))}";
+        UseLoadedMediaButton.Visibility = material.HasPlausibleGeometry ? Visibility.Visible : Visibility.Collapsed;
+    }
+
+    private void UseLoadedMedia_Click(object sender, RoutedEventArgs e)
+    {
+        if (PrinterCombo.SelectedItem is not PrinterDevice { BluetoothInformation.Material: { HasPlausibleGeometry: true } material })
+        {
+            return;
+        }
+
+        _document.WidthMm = material.WidthMm;
+        if (material.HeightMm > 0)
+        {
+            _document.HeightMm = material.HeightMm;
+        }
+
+        foreach (var element in _document.Elements)
+        {
+            element.WidthMm = Math.Min(element.WidthMm, _document.WidthMm);
+            element.HeightMm = Math.Min(element.HeightMm, _document.HeightMm);
+            element.XMm = Math.Min(element.XMm, Math.Max(0, _document.WidthMm - element.WidthMm));
+            element.YMm = Math.Min(element.YMm, Math.Max(0, _document.HeightMm - element.HeightMm));
+        }
+
+        DocumentWidthBox.Text = FormatNumber(_document.WidthMm);
+        DocumentHeightBox.Text = FormatNumber(_document.HeightMm);
+        MarkDirty();
+        RenderDesign();
+        UpdateInspector();
+        StatusText.Text = $"Design resized to printer-reported media: {material.GeometryDescription}.";
     }
 
     private async void Print_Click(object sender, RoutedEventArgs e)
@@ -618,10 +709,14 @@ public partial class MainWindow : Window
 
         if (!device.IsMock)
         {
+            var connection = device.IsBluetooth ? "Bluetooth" : "USB";
+            var media = device.BluetoothInformation?.Material.GeometryDescription;
             var answer = MessageBox.Show(
                 this,
-                $"Send this label directly to {device.DisplayName}?\n\nLoad the correct label roll, close the cover, and keep USB connected. This backend is based on independent reverse engineering and still needs broader hardware testing.",
-                "Direct USB print",
+                $"Send this label directly to {device.DisplayName} over {connection}?" +
+                (media is null ? string.Empty : $"\n\nThe printer currently reports {media}; Etikra will query it again before sending raster data.") +
+                $"\n\nClose the cover and keep the printer connected. This backend is based on independent reverse engineering.",
+                $"Direct {connection} print",
                 MessageBoxButton.OKCancel,
                 MessageBoxImage.Warning);
             if (answer != MessageBoxResult.OK)
