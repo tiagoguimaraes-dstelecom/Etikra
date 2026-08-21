@@ -1,3 +1,4 @@
 <Solution>
   <Project Path="Etikra.csproj" />
+  <Project Path="Tests/Etikra.Tests.csproj" />
 </Solution>
