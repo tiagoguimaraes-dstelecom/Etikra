@@ -43,9 +43,14 @@ internal static class Program
             ("E12 material layout validation", E12MaterialLayout),
             ("E12 continuous material mapping", E12ContinuousMaterial),
             ("E12 BLE raster data framing", E12DataFrames),
+            ("SUPVAN one-to-three block transfer ordering", SupvanBlockTransferOrdering),
+            ("SUPVAN buffer-full retry and optional acknowledgement", SupvanBufferRetryAndOptionalAcknowledgement),
+            ("SUPVAN premature-idle transfer failure", SupvanPrematureIdle),
+            ("SUPVAN transfer cancellation and write failure", SupvanTransferCancellationAndFailure),
             ("SUPVAN head-axis mirror", PrintheadAxisMirror),
             ("E12 15 mm tape centered on 12 mm head", E12ContinuousTapeCenterCrop),
             ("E12 landscape raster rotation", E12LandscapeRotation),
+            ("E12 60 mm multi-buffer raster", E12SixtyMillimeterRaster),
             ("E12 direct-thermal ribbon flag", E12RibbonFlag),
             ("Native monochrome print preview", MonochromePrintPreview),
             ("Document snapshots preserve element identity", SnapshotIdentity),
@@ -236,7 +241,7 @@ internal static class Program
             materialType: printMaterialCode,
             orientation: SupvanRasterOrientation.RotateCounterClockwise);
         Console.WriteLine($"Printer reports {material.GeometryDescription}, type {material.LabelType}, {dotsPerMillimeter:0.##} dots/mm, firmware counter {material.FirmwareCounter} (meaning unverified). ");
-        Console.WriteLine($"Prepared {data.WidthDots} × {data.HeightDots} dots, {data.Compressed.Length} compressed bytes. Sending one ETIKRA test label…");
+        Console.WriteLine($"Prepared {data.WidthDots} × {data.HeightDots} dots in {data.BufferCount} buffer{(data.BufferCount == 1 ? string.Empty : "s")}, {data.CompressedByteCount} compressed bytes. Sending one ETIKRA test label…");
         var progress = new Progress<string>(Console.WriteLine);
         await protocol.PrintAsync(data, progress, CancellationToken.None);
         Console.WriteLine("Test print completed according to printer status.");
@@ -279,12 +284,7 @@ internal static class Program
         Equal(8192u, BitConverter.ToUInt32(compressed, 1), "dictionary size");
         Equal((long)raw.Length, BitConverter.ToInt64(compressed, 5), "uncompressed size");
 
-        var decoder = new Decoder();
-        decoder.SetDecoderProperties(compressed[..5]);
-        using var input = new MemoryStream(compressed, 13, compressed.Length - 13, writable: false);
-        using var output = new MemoryStream();
-        decoder.Code(input, output, compressed.Length - 13, raw.Length, null);
-        True(raw.SequenceEqual(output.ToArray()), "LZMA round trip");
+        True(raw.SequenceEqual(DecompressLzma(compressed)), "LZMA round trip");
     }
 
     private static void SampleLabelRaster()
@@ -292,7 +292,8 @@ internal static class Program
         var profile = PrinterProfiles.Find(0x2073) ?? throw new Exception("T50M Pro profile missing");
         var data = SupvanRasterEncoder.Encode(DocumentService.CreateSampleDocument(), profile, 7);
         True(data.BufferCount >= 1, "at least one buffer");
-        True(data.Compressed.Length is > 13 and <= ushort.MaxValue, "valid compressed page length");
+        True(data.Blocks.All(block => block.Length is > 13 and <= ushort.MaxValue), "valid compressed block lengths");
+        Equal(data.Blocks.Sum(block => block.Length), data.CompressedByteCount, "aggregate compressed byte count");
         Equal(203, profile.Dpi, "T50 DPI");
         Equal(384, profile.PrintheadDots, "T50 printhead width");
     }
@@ -388,6 +389,144 @@ internal static class Program
         Equal(compressed[500], frames[1][12], "second frame payload");
     }
 
+    private static void SupvanBlockTransferOrdering()
+    {
+        for (var blockCount = 1; blockCount <= 3; blockCount++)
+        {
+            var channel = new FakeBlockTransferChannel(
+                Enumerable.Repeat(new SupvanTransferStatus(true, false), blockCount));
+            SupvanBlockTransfer.TransferAsync(
+                    CreateTransferData(blockCount),
+                    channel,
+                    null,
+                    CancellationToken.None,
+                    bufferReadyAttempts: 3,
+                    bufferReadyDelayMilliseconds: 0,
+                    bufferSettleDelayMilliseconds: 0)
+                .GetAwaiter().GetResult();
+
+            var expected = Enumerable.Range(1, blockCount)
+                .SelectMany(index => new[] { "status:ready", $"announce:{index}", $"write:{index}", $"commit:{index}" })
+                .ToArray();
+            True(channel.Events.SequenceEqual(expected), $"{blockCount}-buffer transfer ordering");
+        }
+    }
+
+    private static void SupvanBufferRetryAndOptionalAcknowledgement()
+    {
+        var channel = new FakeBlockTransferChannel(
+            [
+                new SupvanTransferStatus(true, false),
+                new SupvanTransferStatus(true, true),
+                new SupvanTransferStatus(true, false)
+            ])
+        {
+            BufferCommitAcknowledgementOptional = true,
+            OmitCommitAcknowledgementForBlock = 0
+        };
+        var messages = new List<string>();
+        SupvanBlockTransfer.TransferAsync(
+                CreateTransferData(2),
+                channel,
+                new InlineProgress<string>(messages.Add),
+                CancellationToken.None,
+                bufferReadyAttempts: 3,
+                bufferReadyDelayMilliseconds: 0,
+                bufferSettleDelayMilliseconds: 0)
+            .GetAwaiter().GetResult();
+
+        True(channel.Events.SequenceEqual(new[]
+        {
+            "status:ready", "announce:1", "write:1", "commit:1", "status:full", "status:ready", "announce:2", "write:2", "commit:2"
+        }), "buffer-full status should be retried before the second transfer");
+        True(messages.Any(message => message.Contains("optional acknowledgement", StringComparison.Ordinal)),
+            "omitted commit acknowledgement should be reported and tolerated");
+    }
+
+    private static void SupvanPrematureIdle()
+    {
+        var channel = new FakeBlockTransferChannel(
+        [
+            new SupvanTransferStatus(true, false),
+            new SupvanTransferStatus(false, false)
+        ]);
+        var failed = false;
+        try
+        {
+            SupvanBlockTransfer.TransferAsync(
+                    CreateTransferData(2),
+                    channel,
+                    null,
+                    CancellationToken.None,
+                    bufferReadyAttempts: 3,
+                    bufferReadyDelayMilliseconds: 0,
+                    bufferSettleDelayMilliseconds: 0)
+                .GetAwaiter().GetResult();
+        }
+        catch (InvalidOperationException exception) when (exception.Message.Contains("buffer 2 of 2", StringComparison.Ordinal))
+        {
+            failed = true;
+        }
+
+        True(failed, "premature idle should fail before the unsent buffer");
+        True(!channel.Events.Contains("announce:2"), "premature idle must not announce another buffer");
+    }
+
+    private static void SupvanTransferCancellationAndFailure()
+    {
+        using (var cancellation = new CancellationTokenSource())
+        {
+            var channel = new FakeBlockTransferChannel([new SupvanTransferStatus(true, true)])
+            {
+                CancelAfterStatusRead = cancellation
+            };
+            var cancelled = false;
+            try
+            {
+                SupvanBlockTransfer.TransferAsync(
+                        CreateTransferData(1),
+                        channel,
+                        null,
+                        cancellation.Token,
+                        bufferReadyAttempts: 3,
+                        bufferReadyDelayMilliseconds: 0,
+                        bufferSettleDelayMilliseconds: 0)
+                    .GetAwaiter().GetResult();
+            }
+            catch (OperationCanceledException)
+            {
+                cancelled = true;
+            }
+
+            True(cancelled, "cancellation while waiting for buffer space should propagate");
+        }
+
+        var failingChannel = new FakeBlockTransferChannel([new SupvanTransferStatus(true, false)])
+        {
+            FailWriteForBlock = 0
+        };
+        var writeFailed = false;
+        try
+        {
+            SupvanBlockTransfer.TransferAsync(
+                    CreateTransferData(1),
+                    failingChannel,
+                    null,
+                    CancellationToken.None,
+                    bufferReadyAttempts: 3,
+                    bufferReadyDelayMilliseconds: 0,
+                    bufferSettleDelayMilliseconds: 0)
+                .GetAwaiter().GetResult();
+        }
+        catch (IOException)
+        {
+            writeFailed = true;
+        }
+
+        True(writeFailed, "block write failure should propagate");
+        True(!failingChannel.Events.Contains("commit:1"), "failed writes must not commit a partial buffer");
+    }
+
     private static void PrintheadAxisMirror()
     {
         var leftPixel = new byte[] { 0x80 };
@@ -431,6 +570,36 @@ internal static class Program
             SupvanRasterOrientation.RotateCounterClockwise);
         Equal(96, data.WidthDots, "rotated E12 head width");
         Equal(320, data.HeightDots, "rotated E12 feed length");
+        Equal(1, data.BufferCount, "40 mm E12 label remains a single-buffer transfer");
+    }
+
+    private static void E12SixtyMillimeterRaster()
+    {
+        var document = new LabelDocument { WidthMm = 60, HeightMm = 15 };
+        var data = SupvanRasterEncoder.Encode(
+            document,
+            PrinterProfiles.E12,
+            4,
+            1,
+            SupvanRasterOrientation.RotateCounterClockwise);
+
+        Equal(120, data.WidthDots, "60 mm raster retains the 15 mm tape width before head cropping");
+        Equal(480, data.HeightDots, "60 mm E12 feed length");
+        Equal(2, data.BufferCount, "60 mm E12 buffer count");
+        Equal(data.Blocks.Sum(block => block.Length), data.CompressedByteCount, "60 mm aggregate compressed bytes");
+
+        var first = DecompressLzma(data.Blocks[0].Payload);
+        var last = DecompressLzma(data.Blocks[1].Payload);
+        Equal(4096, first.Length, "first uncompressed buffer size");
+        Equal(4096, last.Length, "last uncompressed buffer size");
+        Equal((byte)0x02, first[2], "first buffer page-start flags");
+        Equal((byte)0x0C, last[2], "last buffer page-end flags");
+        Equal((byte)12, first[6], "transferred raster uses the 96-dot E12 printhead");
+        Equal((byte)12, last[6], "all transferred buffers use the 96-dot E12 printhead");
+        Equal((ushort)339, BitConverter.ToUInt16(first, 4), "first buffer image columns");
+        Equal((ushort)125, BitConverter.ToUInt16(last, 4), "last buffer image columns");
+        Equal(480, BitConverter.ToUInt16(first, 4) + BitConverter.ToUInt16(last, 4) + SupvanRasterEncoder.PageMarginDots * 2,
+            "image columns plus page margins preserve 60 mm feed length");
     }
 
     private static void E12RibbonFlag()
@@ -768,6 +937,93 @@ internal static class Program
 
     private static PrinterDeviceInformation CreateDeviceInformation() => new(
         "E12", "G15", "151225", 1, 8, 96, 251, "WriteWithoutResponse", DateTimeOffset.Now);
+
+    private static SupvanPrintData CreateTransferData(int blockCount)
+    {
+        var blocks = Enumerable.Range(0, blockCount)
+            .Select(index => new SupvanCompressedBlock([(byte)(index + 1)]))
+            .ToArray();
+        return new SupvanPrintData(blocks, 60, 96, 320);
+    }
+
+    private static byte[] DecompressLzma(byte[] compressed)
+    {
+        var rawLength = checked((int)BitConverter.ToInt64(compressed, 5));
+        var decoder = new Decoder();
+        decoder.SetDecoderProperties(compressed[..5]);
+        using var input = new MemoryStream(compressed, 13, compressed.Length - 13, writable: false);
+        using var output = new MemoryStream(rawLength);
+        decoder.Code(input, output, compressed.Length - 13, rawLength, null);
+        return output.ToArray();
+    }
+
+    private sealed class FakeBlockTransferChannel(IEnumerable<SupvanTransferStatus> statuses) : ISupvanBlockTransferChannel
+    {
+        private readonly Queue<SupvanTransferStatus> _statuses = new(statuses);
+
+        public List<string> Events { get; } = [];
+        public bool BufferCommitAcknowledgementOptional { get; set; }
+        public int? OmitCommitAcknowledgementForBlock { get; set; }
+        public int? FailWriteForBlock { get; set; }
+        public CancellationTokenSource? CancelAfterStatusRead { get; set; }
+
+        public Task<SupvanTransferStatus> ReadTransferStatusAsync(CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (_statuses.Count == 0)
+            {
+                throw new InvalidOperationException("Fake transfer status queue is empty.");
+            }
+
+            var status = _statuses.Dequeue();
+            Events.Add(status.BufferFull ? "status:full" : status.Printing ? "status:ready" : "status:idle");
+            CancelAfterStatusRead?.Cancel();
+            return Task.FromResult(status);
+        }
+
+        public Task AnnounceBlockAsync(
+            SupvanCompressedBlock block,
+            int blockIndex,
+            int blockCount,
+            CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            Events.Add($"announce:{blockIndex + 1}");
+            return Task.CompletedTask;
+        }
+
+        public Task WriteBlockAsync(
+            SupvanCompressedBlock block,
+            int blockIndex,
+            int blockCount,
+            CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            Events.Add($"write:{blockIndex + 1}");
+            return FailWriteForBlock == blockIndex
+                ? Task.FromException(new IOException("simulated block write failure"))
+                : Task.CompletedTask;
+        }
+
+        public Task CommitBlockAsync(
+            SupvanCompressedBlock block,
+            ushort speed,
+            int blockIndex,
+            int blockCount,
+            CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            Events.Add($"commit:{blockIndex + 1}");
+            return OmitCommitAcknowledgementForBlock == blockIndex
+                ? Task.FromException(new TimeoutException("simulated omitted acknowledgement"))
+                : Task.CompletedTask;
+        }
+    }
+
+    private sealed class InlineProgress<T>(Action<T> report) : IProgress<T>
+    {
+        public void Report(T value) => report(value);
+    }
 
     private sealed class FakePrinterTransportFactory(PrinterCandidate candidate, BleMaterialReport material) : IPrinterTransportFactory
     {

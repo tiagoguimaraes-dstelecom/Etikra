@@ -2,7 +2,7 @@ using System.IO;
 
 namespace Etikra.Printing;
 
-internal sealed class SupvanUsbProtocol : IAsyncDisposable
+internal sealed class SupvanUsbProtocol : IAsyncDisposable, ISupvanBlockTransferChannel
 {
     private const byte CommandBufferFull = 0x10;
     private const byte CommandInquiryStatus = 0x11;
@@ -32,23 +32,10 @@ internal sealed class SupvanUsbProtocol : IAsyncDisposable
         progress?.Report("Starting print…");
         await SendCommandAsync(CommandStartPrint, 0, null, cancellationToken);
         await WaitForAsync(status => status.Printing, 60, "printing station", cancellationToken);
-        await WaitForAsync(status => !status.BufferFull, 200, "buffer space", cancellationToken, 20);
 
         try
         {
-            progress?.Report($"Sending {data.Compressed.Length:N0} bytes…");
-            await SendCommandAsync(CommandNextZippedBulk, checked((ushort)data.Compressed.Length), null, cancellationToken);
-            foreach (var chunk in data.Compressed.Chunk(64))
-            {
-                await _hid.WriteAsync(chunk, cancellationToken);
-                if (chunk.Length == 64)
-                {
-                    await Task.Delay(1, cancellationToken);
-                }
-            }
-
-            await Task.Delay(20, cancellationToken);
-            await SendCommandAsync(CommandBufferFull, checked((ushort)data.Compressed.Length), data.Speed, cancellationToken);
+            await SupvanBlockTransfer.TransferAsync(data, this, progress, cancellationToken);
             progress?.Report("Printing…");
             await WaitForAsync(status => !status.DeviceBusy && !status.Printing, 300, "print completion", cancellationToken);
         }
@@ -66,6 +53,46 @@ internal sealed class SupvanUsbProtocol : IAsyncDisposable
             throw;
         }
     }
+
+    bool ISupvanBlockTransferChannel.BufferCommitAcknowledgementOptional => false;
+
+    async Task<SupvanTransferStatus> ISupvanBlockTransferChannel.ReadTransferStatusAsync(CancellationToken cancellationToken)
+    {
+        var status = await QueryStatusAsync(cancellationToken);
+        status.ThrowIfError();
+        return new SupvanTransferStatus(status.Printing, status.BufferFull);
+    }
+
+    Task ISupvanBlockTransferChannel.AnnounceBlockAsync(
+        SupvanCompressedBlock block,
+        int blockIndex,
+        int blockCount,
+        CancellationToken cancellationToken) =>
+        SendCommandAsync(CommandNextZippedBulk, checked((ushort)block.Length), null, cancellationToken);
+
+    async Task ISupvanBlockTransferChannel.WriteBlockAsync(
+        SupvanCompressedBlock block,
+        int blockIndex,
+        int blockCount,
+        CancellationToken cancellationToken)
+    {
+        foreach (var chunk in block.Payload.Chunk(64))
+        {
+            await _hid.WriteAsync(chunk, cancellationToken);
+            if (chunk.Length == 64)
+            {
+                await Task.Delay(1, cancellationToken);
+            }
+        }
+    }
+
+    Task ISupvanBlockTransferChannel.CommitBlockAsync(
+        SupvanCompressedBlock block,
+        ushort speed,
+        int blockIndex,
+        int blockCount,
+        CancellationToken cancellationToken) =>
+        SendCommandAsync(CommandBufferFull, checked((ushort)block.Length), speed, cancellationToken);
 
     private async Task<SupvanStatus> QueryStatusAsync(CancellationToken cancellationToken)
     {

@@ -6,7 +6,20 @@ using SevenZip.Compression.LZMA;
 
 namespace Etikra.Printing;
 
-public sealed record SupvanPrintData(byte[] Compressed, int BufferCount, ushort Speed, int WidthDots, int HeightDots);
+public sealed record SupvanCompressedBlock(byte[] Payload)
+{
+    public int Length => Payload.Length;
+}
+
+public sealed record SupvanPrintData(
+    IReadOnlyList<SupvanCompressedBlock> Blocks,
+    ushort Speed,
+    int WidthDots,
+    int HeightDots)
+{
+    public int BufferCount => Blocks.Count;
+    public int CompressedByteCount => Blocks.Sum(block => block.Length);
+}
 
 public enum SupvanRasterOrientation
 {
@@ -16,7 +29,7 @@ public enum SupvanRasterOrientation
 
 /// <summary>
 /// Converts Etikra's rendered label into the 4096-byte buffers understood by
-/// SUPVAN firmware, then wraps them in an LZMA1-alone stream.
+/// SUPVAN firmware, then wraps each buffer in its own LZMA1-alone stream.
 /// </summary>
 public static class SupvanRasterEncoder
 {
@@ -51,21 +64,21 @@ public static class SupvanRasterEncoder
         var canvas = BuildPrintheadCanvas(rowMajor, rasterWidth, rasterHeight, profile.PrintheadDots);
         var perLineBytes = profile.PrintheadDots / 8;
         var buffers = BuildPrintBuffers(canvas, perLineBytes, rasterHeight, density, materialType);
-        var raw = new byte[buffers.Count * PrintBufferSize];
-        for (var i = 0; i < buffers.Count; i++)
+        var blocks = new List<SupvanCompressedBlock>(buffers.Count);
+        foreach (var buffer in buffers)
         {
-            Buffer.BlockCopy(buffers[i], 0, raw, i * PrintBufferSize, PrintBufferSize);
+            var compressed = CompressLzma(buffer);
+            if (compressed.Length > ushort.MaxValue)
+            {
+                throw new InvalidOperationException(
+                    $"A compressed print buffer is {compressed.Length:N0} bytes, above this protocol's 65,535-byte transfer limit. Reduce the image detail.");
+            }
+
+            blocks.Add(new SupvanCompressedBlock(compressed));
         }
 
-        var compressed = CompressLzma(raw);
-        if (compressed.Length > ushort.MaxValue)
-        {
-            throw new InvalidOperationException(
-                $"The compressed label is {compressed.Length:N0} bytes, above this protocol's 65,535-byte page limit. Reduce the label height or image detail.");
-        }
-
-        var average = compressed.Length / buffers.Count;
-        return new SupvanPrintData(compressed, buffers.Count, CalculateSpeed(average), rasterWidth, rasterHeight);
+        var average = blocks.Sum(block => block.Length) / blocks.Count;
+        return new SupvanPrintData(blocks, CalculateSpeed(average), rasterWidth, rasterHeight);
     }
 
     internal static byte[] RotateCounterClockwise(byte[] rows, int width, int height)

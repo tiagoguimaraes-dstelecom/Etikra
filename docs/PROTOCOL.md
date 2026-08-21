@@ -47,11 +47,12 @@ CHECK_DEVICE
   → poll INQUIRY_STA until idle
   → START_PRINT
   → poll until printing
-  → poll until buffer is available
-  → NEXT_ZIPPEDBULK(compressed length)
-  → raw compressed data in 64-byte HID payloads
-  → 20 ms settle
-  → BUF_FULL(compressed length, speed)
+  → for each independently compressed 4096-byte print buffer:
+      poll until buffer is available
+      → NEXT_ZIPPEDBULK(compressed length)
+      → raw compressed data in 64-byte HID payloads
+      → 20 ms settle
+      → BUF_FULL(compressed length, speed)
   → poll until idle
 ```
 
@@ -97,7 +98,7 @@ The checksum is the sum of header bytes 2–13 plus the byte immediately before 
 
 ## Compression and speed
 
-All page buffers are concatenated and compressed as one LZMA1-alone stream using:
+Each 4096-byte print buffer is compressed as an independent LZMA1-alone stream using:
 
 ```text
 dictionary = 8192 bytes
@@ -106,10 +107,10 @@ lp = 0
 pb = 2
 nice/fast bytes = 128
 properties byte = 5D
-header size field = exact uncompressed byte count
+header size field = 4096-byte uncompressed buffer size
 ```
 
-Etikra uses the MIT/public-domain [`LZMA-SDK` NuGet package](https://www.nuget.org/packages/LZMA-SDK/22.1.1), which packages Igor Pavlov's public-domain SDK. The test harness decodes the produced stream again and checks the header values. Pages whose compressed size exceeds the protocol's 16-bit length field are rejected before connecting.
+Etikra uses the MIT/public-domain [`LZMA-SDK` NuGet package](https://www.nuget.org/packages/LZMA-SDK/22.1.1), which packages Igor Pavlov's public-domain SDK. The test harness decodes every produced block again and checks the header values. Any individual compressed block that exceeds the protocol's 16-bit transfer-length field is rejected before connecting.
 
 Speed is derived from average compressed bytes per 4096-byte buffer: `10` above 3000 bytes, then `15`, `20`, `25`, `40`, `45`, `55`, and `60` at decreasing thresholds matching the public reference implementation.
 
@@ -167,17 +168,19 @@ The `RETURN_MAT` raw type is a different domain from the two-bit print-buffer ma
 
 The print-buffer format reserves eight dots at each feed-direction end. On this 8 dots/mm E12 that is a 1 mm boundary. A photographed job with a full-canvas rectangle confirmed that edge artwork is only partially printable, while the rectangle inset by 1 mm printed completely. For 15 mm tape, the 12 mm head is centered and the transverse non-printable inset is 1.5 mm per tape edge. Etikra draws the applicable safe boundary on the editor, shows the exact thresholded 1-bit raster separately from the vector design, and rejects elements crossing it before transmission. Rectangle strokes are inset into their declared bounds in both editor and renderer so their geometry is consistent.
 
-Compressed data is split into 500-byte payloads inside checksummed 506-byte packets, then wrapped as 512-byte `7E 5A` frames. Each frame is fragmented into conservative 180-byte GATT writes. The state machine is:
+Each independently compressed print buffer is split into 500-byte payloads inside checksummed 506-byte packets, then wrapped as 512-byte `7E 5A` frames. Each frame is fragmented into conservative 180-byte GATT writes. The state machine is:
 
 ```text
-CHECK_DEVICE → idle status → START_PRINT → printing/buffer-ready status
-→ NEXT_ZIPPEDBULK(block_size=512, frame_count)
-→ 512-byte data frames
-→ BUF_FULL(compressed length, speed)
+CHECK_DEVICE → idle status → START_PRINT → printing status
+→ for each compressed print buffer:
+    printing/buffer-ready status
+    → NEXT_ZIPPEDBULK(block_size=512, frame_count)
+    → 512-byte data frames
+    → BUF_FULL(compressed length, speed)
 → status polling until idle
 ```
 
-The live firmware accepted the raster transfer but omitted the `BUF_FULL (10)` echo. Since that opcode is also documented as flow control/output-only, Etikra treats only that missing echo as optional and then uses `INQUIRY_STA` as the completion authority. Any other timeout or decoded printer error triggers a best-effort `STOP_PRINT`.
+The live firmware accepted raster transfers but omitted the `BUF_FULL (10)` echo. Since that opcode is also documented as flow control/output-only, Etikra treats only that missing echo as optional. Before another block it requires `INQUIRY_STA` to report that the printer is still printing and its buffer is available; after the final block it polls until idle. Premature idle, any other timeout, or a decoded printer error triggers a best-effort `STOP_PRINT`.
 
 After the revised hardware print, the E12 asserted `ribbon_end` even though it is a ribbonless direct-thermal device. Etikra preserves that raw flag for diagnostics but ignores it only for the E12 completion gate when it is the sole error. Cover-open, missing/empty labels, read/write faults, low battery, and head-temperature errors remain blocking.
 

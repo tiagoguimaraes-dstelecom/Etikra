@@ -30,7 +30,7 @@ Etikra is an open-source Windows label designer for SUPVAN and KATASYMBOL therma
 | Mock/file output | Ready | Default and safe without hardware. |
 | USB HID | Experimental | Protocol is implemented; this Windows port has not yet been validated on physical hardware in this repository. |
 | Bluetooth Classic SPP | Researched, not implemented | Public work documents shared commands with different `7E 5A` framing. |
-| Bluetooth LE GATT | Experimental, live E12 path | Discovery, configuration queries, raster framing, and printing are implemented. Live unit `T0188A2602242874` reported model `G15`, firmware `1`, and `8 dots/mm`. Verified loaded-media replies include `12 × 40 mm` die-cut stock with a `3 mm` gap and `15 × L` continuous tape. Its firmware can omit the final `BUF_FULL` echo, so Etikra verifies completion through status polling. |
+| Bluetooth LE GATT | Experimental, live E12 path | Discovery, configuration queries, raster framing, and printing are implemented. Live unit `T0188A2602242874` reported model `G15`, firmware `1`, and `8 dots/mm`. Verified loaded-media replies include `12 × 40 mm` die-cut stock with a `3 mm` gap and `15 × L` continuous tape. Its firmware can omit `BUF_FULL` echoes, so Etikra verifies buffer readiness and completion through status polling. |
 
 Known USB product IDs and head profiles come from the [supvan-cups model registry](https://github.com/heeen/supvan-cups/blob/master/data/models.toml). Unknown PID values are displayed but blocked from printing so Etikra never guesses a raster width.
 
@@ -73,9 +73,9 @@ Holding Ctrl while dragging disables the normal 0.5 mm snap. Arrow keys nudge by
 The main source is [`heeen/supvan-cups`](https://github.com/heeen/supvan-cups), an MIT-licensed Rust driver whose [protocol notes](https://github.com/heeen/supvan-cups/blob/master/docs/PROTOCOL.md) document the T-series command set from vendor-app analysis and hardware captures. Its key findings used here are:
 
 - USB VID `1820`, HID commands beginning `C0 40`, and big-endian command parameters.
-- `CHECK_DEVICE → ready → START_PRINT → printing → NEXT_ZIPPEDBULK → raster bytes → BUF_FULL → complete`.
+- `CHECK_DEVICE → ready → START_PRINT → printing → (NEXT_ZIPPEDBULK → raster bytes → BUF_FULL) per print buffer → complete`.
 - Column/feed-major LSB-first raster rows inside checksummed 4096-byte print buffers.
-- LZMA1-alone compression with an 8192-byte dictionary, `lc=3`, `lp=0`, `pb=2`, and an exact uncompressed-size header.
+- Independent LZMA1-alone compression for each 4096-byte print buffer, with an 8192-byte dictionary, `lc=3`, `lp=0`, `pb=2`, and an exact uncompressed-size header.
 
 The separate [`katasymbol-e12-lab`](https://github.com/eteriall/katasymbol-e12-lab) project supplies the E12 BLE service map, 16-byte command frames, 512-byte compressed raster frames, and tested timing Etikra follows. Etikra additionally verifies loaded media and resolution from live replies instead of using the reference tool's default label dimensions.
 

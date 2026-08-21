@@ -394,37 +394,7 @@ public sealed class BleProtocol : IAsyncDisposable
         try
         {
             await WaitForStatusAsync(status => status.Printing, 60, "printing state", cancellationToken, ignoreDirectThermalRibbonEnd: true);
-            await WaitForStatusAsync(status => !status.BufferFull, 200, "buffer space", cancellationToken, 20, ignoreDirectThermalRibbonEnd: true);
-
-            var frames = BuildDataFrames(data.Compressed);
-            progress?.Report($"Sending {data.Compressed.Length:N0} compressed bytes in {frames.Count} BLE frame{(frames.Count == 1 ? string.Empty : "s")}…");
-            await SendCommandAsync(
-                CommandNextZippedBulk,
-                512,
-                checked((ushort)frames.Count),
-                cancellationToken);
-
-            for (var index = 0; index < frames.Count; index++)
-            {
-                await SendDataFrameAsync(frames[index], readResponse: index < frames.Count - 1, cancellationToken);
-            }
-
-            await Task.Delay(20, cancellationToken);
-            try
-            {
-                await SendCommandAsync(
-                    CommandBufferFull,
-                    checked((ushort)data.Compressed.Length),
-                    data.Speed,
-                    cancellationToken);
-            }
-            catch (TimeoutException)
-            {
-                // This E12 firmware accepts BUF_FULL and begins/finishes the job,
-                // but may not echo command 0x10. Status polling is authoritative.
-                progress?.Report("Printer omitted the optional buffer-ready echo; verifying completion from live status…");
-            }
-
+            await SupvanBlockTransfer.TransferAsync(data, new BlockTransferChannel(this), progress, cancellationToken);
             progress?.Report("Printing over Bluetooth…");
             await WaitForStatusAsync(status => !status.DeviceBusy && !status.Printing, 300, "print completion", cancellationToken, ignoreDirectThermalRibbonEnd: true);
         }
@@ -441,6 +411,87 @@ public sealed class BleProtocol : IAsyncDisposable
 
             throw;
         }
+    }
+
+    private async Task<SupvanTransferStatus> ReadTransferStatusAsync(CancellationToken cancellationToken)
+    {
+        var status = await ReadStatusAsync(cancellationToken);
+        var blockingErrors = status.BlockingErrors(ignoreDirectThermalRibbonEnd: true);
+        if (blockingErrors.Count > 0)
+        {
+            throw new InvalidOperationException("Printer error: " + string.Join(", ", blockingErrors));
+        }
+
+        return new SupvanTransferStatus(status.Printing, status.BufferFull);
+    }
+
+    private async Task AnnounceBlockAsync(
+        SupvanCompressedBlock block,
+        int blockIndex,
+        int blockCount,
+        CancellationToken cancellationToken)
+    {
+        var frames = BuildDataFrames(block.Payload);
+        await SendCommandAsync(
+            CommandNextZippedBulk,
+            512,
+            checked((ushort)frames.Count),
+            cancellationToken);
+    }
+
+    private async Task WriteBlockAsync(
+        SupvanCompressedBlock block,
+        int blockIndex,
+        int blockCount,
+        CancellationToken cancellationToken)
+    {
+        var frames = BuildDataFrames(block.Payload);
+        for (var index = 0; index < frames.Count; index++)
+        {
+            await SendDataFrameAsync(frames[index], readResponse: index < frames.Count - 1, cancellationToken);
+        }
+    }
+
+    private Task CommitBlockAsync(
+        SupvanCompressedBlock block,
+        ushort speed,
+        int blockIndex,
+        int blockCount,
+        CancellationToken cancellationToken) =>
+        SendCommandAsync(
+            CommandBufferFull,
+            checked((ushort)block.Length),
+            speed,
+            cancellationToken);
+
+    private sealed class BlockTransferChannel(BleProtocol owner) : ISupvanBlockTransferChannel
+    {
+        public bool BufferCommitAcknowledgementOptional => true;
+
+        public Task<SupvanTransferStatus> ReadTransferStatusAsync(CancellationToken cancellationToken) =>
+            owner.ReadTransferStatusAsync(cancellationToken);
+
+        public Task AnnounceBlockAsync(
+            SupvanCompressedBlock block,
+            int blockIndex,
+            int blockCount,
+            CancellationToken cancellationToken) =>
+            owner.AnnounceBlockAsync(block, blockIndex, blockCount, cancellationToken);
+
+        public Task WriteBlockAsync(
+            SupvanCompressedBlock block,
+            int blockIndex,
+            int blockCount,
+            CancellationToken cancellationToken) =>
+            owner.WriteBlockAsync(block, blockIndex, blockCount, cancellationToken);
+
+        public Task CommitBlockAsync(
+            SupvanCompressedBlock block,
+            ushort speed,
+            int blockIndex,
+            int blockCount,
+            CancellationToken cancellationToken) =>
+            owner.CommitBlockAsync(block, speed, blockIndex, blockCount, cancellationToken);
     }
 
     public async Task<byte[]> SendCommandAsync(
