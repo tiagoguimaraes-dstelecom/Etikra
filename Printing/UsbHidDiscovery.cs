@@ -7,9 +7,9 @@ public static class UsbHidDiscovery
     private const uint DigcfPresent = 0x00000002;
     private const uint DigcfDeviceInterface = 0x00000010;
 
-    public static IReadOnlyList<PrinterDevice> FindSupvanPrinters()
+    public static IReadOnlyList<PrinterCandidate> FindSupvanPrinters()
     {
-        var devices = new List<PrinterDevice>();
+        var devices = new List<PrinterCandidate>();
         HidD_GetHidGuid(out var hidGuid);
         var set = SetupDiGetClassDevs(ref hidGuid, null, IntPtr.Zero, DigcfPresent | DigcfDeviceInterface);
         if (set == new IntPtr(-1))
@@ -57,7 +57,7 @@ public static class UsbHidDiscovery
                     _ = TryParseId(path, "pid_", out var pid);
                     var profile = PrinterProfiles.Find(pid);
                     var name = profile is null ? $"SUPVAN device (PID {pid:X4}, unsupported)" : $"SUPVAN / KATASYMBOL {profile.Name}";
-                    devices.Add(new PrinterDevice(path, name, profile, path));
+                    devices.Add(new PrinterCandidate(path, name, PrinterTransport.UsbHid, profile, path));
                 }
                 finally
                 {

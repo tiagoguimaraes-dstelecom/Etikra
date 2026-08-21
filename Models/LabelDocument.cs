@@ -14,13 +14,29 @@ public enum LabelElementKind
     Image
 }
 
+public enum LabelMediaKind
+{
+    Fixed,
+    Continuous
+}
+
+public sealed class LabelMediaRequirement
+{
+    public LabelMediaKind Kind { get; set; }
+    public double TapeWidthMm { get; set; }
+    public double? FixedLengthMm { get; set; }
+    public double? GapMm { get; set; }
+}
+
 public sealed class LabelDocument : INotifyPropertyChanged
 {
     private string _name = "Untitled label";
     private double _widthMm = 40;
     private double _heightMm = 30;
 
-    public int FormatVersion { get; set; } = 1;
+    public int FormatVersion { get; set; } = 2;
+
+    public LabelMediaRequirement? MediaRequirement { get; set; }
 
     public string Name
     {

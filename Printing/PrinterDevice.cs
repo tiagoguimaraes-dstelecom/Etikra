@@ -1,5 +1,3 @@
-using Etikra.Printing.Bluetooth;
-
 namespace Etikra.Printing;
 
 public sealed record PrinterProfile(
@@ -10,24 +8,6 @@ public sealed record PrinterProfile(
     string Family)
 {
     public double PrintheadWidthMm => PrintheadDots * 25.4 / Dpi;
-}
-
-public sealed record PrinterDevice(
-    string Id,
-    string DisplayName,
-    PrinterProfile? Profile,
-    string? DevicePath,
-    bool IsMock = false,
-    ulong? BluetoothAddress = null,
-    BlePrinterInformation? BluetoothInformation = null)
-{
-    public bool IsBluetooth => BluetoothAddress is not null;
-    public bool IsSupported => IsMock ||
-                               (Profile is not null && DevicePath is not null) ||
-                               (Profile is not null && BluetoothAddress is not null &&
-                                BluetoothInformation is { DotsPerMillimeter: not null, Material.HasPlausibleGeometry: true } information &&
-                                information.Material.TryGetE12PrintMaterialCode(out _));
-    public string ConnectionDescription => IsMock ? "Safe file output" : IsBluetooth ? "Bluetooth LE" : "USB HID";
 }
 
 public static class PrinterProfiles

@@ -1,4 +1,5 @@
 using Microsoft.Win32;
+using System.ComponentModel;
 using System.Globalization;
 using System.IO;
 using System.Windows;
@@ -20,7 +21,12 @@ public partial class MainWindow : Window
     private const double PreviewPixelsPerMm = 10;
     private static readonly Brush SelectionBrush = new SolidColorBrush(Color.FromRgb(113, 87, 232));
 
-    private LabelDocument _document = DocumentService.CreateStarterDocument();
+    private readonly PrinterSessionManager _printerSession = new();
+    private readonly SettingsService _settingsService = new();
+    private readonly CancellationTokenSource _windowLifetime = new();
+    private EtikraSettings _settings = new();
+    private LabelDocument? _currentDocument;
+    private LabelDocument _document => _currentDocument ?? throw new InvalidOperationException("No label is open.");
     private LabelElement? _selected;
     private string? _currentPath;
     private bool _isDirty;
@@ -29,16 +35,31 @@ public partial class MainWindow : Window
     private Point _dragStart;
     private double _dragStartX;
     private double _dragStartY;
+    private bool _documentPristine;
+    private bool _documentCreatedFromMedia;
+    private DateTimeOffset? _deactivatedAt;
+    private bool _closeConfirmed;
+    private bool _isPrinting;
 
     public MainWindow()
     {
         InitializeComponent();
-        LoadDocumentIntoEditor();
-        Loaded += async (_, _) => await RefreshPrintersAsync();
+        ShowEmptyWorkspace();
+        _printerSession.StateChanged += PrinterSession_StateChanged;
+        Loaded += MainWindow_Loaded;
+        Activated += MainWindow_Activated;
+        Deactivated += (_, _) => _deactivatedAt = DateTimeOffset.Now;
     }
 
     private void LoadDocumentIntoEditor()
     {
+        EmptyWorkspacePanel.Visibility = Visibility.Collapsed;
+        CanvasScrollViewer.Visibility = Visibility.Visible;
+        NoDocumentToolsHint.Visibility = Visibility.Collapsed;
+        EditorToolsPanel.Visibility = Visibility.Visible;
+        SaveButton.IsEnabled = true;
+        ExportButton.IsEnabled = true;
+        MockPrintButton.IsEnabled = true;
         _selected = null;
         DocumentNameBox.Text = _document.Name;
         DocumentWidthBox.Text = FormatNumber(_document.WidthMm);
@@ -46,6 +67,33 @@ public partial class MainWindow : Window
         RenderDesign();
         UpdateInspector();
         UpdateTitle();
+        UpdateDocumentMediaBindingText();
+        UpdateReadiness();
+    }
+
+    private void ShowEmptyWorkspace()
+    {
+        _currentDocument = null;
+        _selected = null;
+        _currentPath = null;
+        _isDirty = false;
+        _documentPristine = false;
+        _documentCreatedFromMedia = false;
+        EmptyWorkspacePanel.Visibility = Visibility.Visible;
+        CanvasScrollViewer.Visibility = Visibility.Collapsed;
+        NoDocumentToolsHint.Visibility = Visibility.Visible;
+        EditorToolsPanel.Visibility = Visibility.Collapsed;
+        SaveButton.IsEnabled = false;
+        ExportButton.IsEnabled = false;
+        MockPrintButton.IsEnabled = false;
+        DuplicateButton.IsEnabled = false;
+        DeleteButton.IsEnabled = false;
+        PrintRasterPreview.Source = null;
+        PrintRasterPreviewCaption.Text = "Create a label to see its thermal-dot preview.";
+        DocumentStatusText.Text = "No label";
+        Title = "Etikra";
+        UpdateInspector();
+        UpdateReadiness();
     }
 
     private void RenderDesign()
@@ -295,11 +343,8 @@ public partial class MainWindow : Window
             return;
         }
 
-        _document = new LabelDocument();
-        _currentPath = null;
-        _isDirty = false;
-        LoadDocumentIntoEditor();
-        StatusText.Text = "New label created.";
+        ShowEmptyWorkspace();
+        StatusText.Text = "Choose installed media or a custom size for the new label.";
     }
 
     private async void Open_Click(object sender, RoutedEventArgs e)
@@ -321,9 +366,11 @@ public partial class MainWindow : Window
 
         try
         {
-            _document = await DocumentService.LoadAsync(dialog.FileName);
+            _currentDocument = await DocumentService.LoadAsync(dialog.FileName);
             _currentPath = dialog.FileName;
             _isDirty = false;
+            _documentPristine = false;
+            _documentCreatedFromMedia = _document.MediaRequirement is not null;
             LoadDocumentIntoEditor();
             StatusText.Text = $"Opened {System.IO.Path.GetFileName(dialog.FileName)}.";
         }
@@ -337,6 +384,11 @@ public partial class MainWindow : Window
 
     private async Task<bool> SaveDocumentAsync()
     {
+        if (_currentDocument is null)
+        {
+            return false;
+        }
+
         if (_currentPath is null)
         {
             var dialog = new SaveFileDialog
@@ -372,6 +424,11 @@ public partial class MainWindow : Window
 
     private void Export_Click(object sender, RoutedEventArgs e)
     {
+        if (_currentDocument is null)
+        {
+            return;
+        }
+
         var dialog = new SaveFileDialog
         {
             Title = "Export print-ready PNG",
@@ -490,6 +547,15 @@ public partial class MainWindow : Window
         _document.Name = string.IsNullOrWhiteSpace(DocumentNameBox.Text) ? "Untitled label" : DocumentNameBox.Text.Trim();
         if (TryReadNumber(DocumentWidthBox.Text, out var width)) _document.WidthMm = width;
         if (TryReadNumber(DocumentHeightBox.Text, out var height)) _document.HeightMm = height;
+        if (_document.MediaRequirement is { } requirement &&
+            (Math.Abs(_document.HeightMm - requirement.TapeWidthMm) > 0.1 ||
+             (requirement.Kind == LabelMediaKind.Fixed &&
+              requirement.FixedLengthMm is double fixedLength &&
+              Math.Abs(_document.WidthMm - fixedLength) > 0.1)))
+        {
+            _document.MediaRequirement = null;
+            _documentCreatedFromMedia = false;
+        }
         DocumentWidthBox.Text = FormatNumber(_document.WidthMm);
         DocumentHeightBox.Text = FormatNumber(_document.HeightMm);
 
@@ -573,111 +639,337 @@ public partial class MainWindow : Window
         _updatingInspector = false;
     }
 
-    private async void RefreshPrinters_Click(object sender, RoutedEventArgs e) => await RefreshPrintersAsync();
-
-    private async Task RefreshPrintersAsync()
+    private async void MainWindow_Loaded(object sender, RoutedEventArgs e)
     {
-        RefreshPrintersButton.IsEnabled = false;
-        UseLoadedMediaButton.IsEnabled = false;
-        StatusText.Text = "Searching for SUPVAN USB and Bluetooth printers…";
-        var selectedId = (PrinterCombo.SelectedItem as PrinterDevice)?.Id;
-        try
+        _settings = await _settingsService.LoadAsync(_windowLifetime.Token);
+        DensitySlider.Value = _settings.Density;
+        if (_settings.LastPrinter is { } remembered)
         {
-            var usbTask = Task.Run(UsbHidDiscovery.FindSupvanPrinters);
-            var bleTask = BleDiscovery.ScanAsync(TimeSpan.FromSeconds(5));
-            await Task.WhenAll(usbTask, bleTask);
-            var usbDevices = await usbTask;
-            var bleAdvertisements = (await bleTask).Where(item => item.LooksLikeE12).ToArray();
-            var items = new List<PrinterDevice>
+            StatusText.Text = $"Reconnecting to {remembered.DisplayName}…";
+            try
             {
-                new("mock", "Preview / mock printer", null, null, true)
-            };
-            items.AddRange(usbDevices);
-            foreach (var advertisement in bleAdvertisements)
-            {
-                try
-                {
-                    await using var protocol = await BleProtocol.ConnectAsync(advertisement.Address);
-                    var information = await protocol.ReadInformationAsync();
-                    var displayName = information.ProtocolDeviceName is { Length: > 0 } model
-                        ? $"{model} / E12 · Bluetooth · {information.Material.GeometryDescription}"
-                        : $"{information.BluetoothName} · Bluetooth · {information.Material.GeometryDescription}";
-                    items.Add(new PrinterDevice(
-                        $"ble:{advertisement.Address:X12}",
-                        displayName,
-                        PrinterProfiles.E12,
-                        null,
-                        BluetoothAddress: advertisement.Address,
-                        BluetoothInformation: information));
-                }
-                catch (Exception exception)
-                {
-                    StatusText.Text = $"Found Bluetooth candidate {advertisement.Name}, but configuration query failed: {exception.Message}";
-                }
+                await ConnectPrinterAsync(remembered.ToCandidate());
             }
-
-            PrinterCombo.ItemsSource = items;
-            PrinterCombo.SelectedItem = items.FirstOrDefault(item => item.Id == selectedId) ?? items[0];
-            var realCount = usbDevices.Count + items.Count(item => item.IsBluetooth);
-            StatusText.Text = realCount == 0
-                ? "No SUPVAN printer found; mock output is ready."
-                : $"Found {realCount} SUPVAN printer{(realCount == 1 ? string.Empty : "s")}.";
+            catch
+            {
+                StatusText.Text = "Remembered printer is unavailable. Editing remains available offline.";
+            }
         }
-        catch (Exception exception)
+        else
         {
-            PrinterCombo.ItemsSource = new[] { new PrinterDevice("mock", "Preview / mock printer", null, null, true) };
-            PrinterCombo.SelectedIndex = 0;
-            StatusText.Text = "Printer discovery failed; mock output is ready.";
-            MessageBox.Show(this, exception.Message, "USB discovery failed", MessageBoxButton.OK, MessageBoxImage.Warning);
-        }
-        finally
-        {
-            RefreshPrintersButton.IsEnabled = true;
-            UseLoadedMediaButton.IsEnabled = true;
+            await ScanForPrintersAsync();
         }
     }
 
-    private void PrinterCombo_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    private async void MainWindow_Activated(object? sender, EventArgs e)
     {
-        if (PrinterCombo.SelectedItem is not PrinterDevice device)
+        if (_deactivatedAt is not DateTimeOffset deactivated || DateTimeOffset.Now - deactivated < TimeSpan.FromSeconds(5))
         {
-            PrinterInformationText.Text = "Select a printer to see its configuration.";
-            UseLoadedMediaButton.Content = "Use loaded media size";
-            UseLoadedMediaButton.Visibility = Visibility.Collapsed;
-            UpdatePrintRasterPreview();
             return;
         }
 
-        if (device.BluetoothInformation is not { } information)
+        _deactivatedAt = null;
+        if (_printerSession.ConnectionState == PrinterConnectionState.Ready &&
+            _printerSession.ActivePrinter?.Transport == PrinterTransport.BluetoothLe)
         {
-            PrinterInformationText.Text = device.IsMock
-                ? "Renders a PNG locally and sends nothing to hardware."
-                : $"{device.ConnectionDescription} · {device.Profile?.Dpi} dpi · {device.Profile?.PrintheadDots} dots";
-            UseLoadedMediaButton.Content = "Use loaded media size";
-            UseLoadedMediaButton.Visibility = Visibility.Collapsed;
+            try
+            {
+                await _printerSession.RefreshAsync(_windowLifetime.Token);
+            }
+            catch
+            {
+                // The live cards expose the error and keep offline editing available.
+            }
+        }
+    }
+
+    private void PrinterSession_StateChanged(object? sender, EventArgs e)
+    {
+        if (!Dispatcher.CheckAccess())
+        {
+            Dispatcher.Invoke(() =>
+            {
+                UpdatePrinterPanels();
+                HandleAutomaticMediaChange();
+            });
+            return;
+        }
+
+        UpdatePrinterPanels();
+        HandleAutomaticMediaChange();
+    }
+
+    private async void FindPrinter_Click(object sender, RoutedEventArgs e) => await ScanForPrintersAsync();
+
+    private async Task ScanForPrintersAsync()
+    {
+        PrinterCandidatesPanel.Visibility = Visibility.Visible;
+        PrinterScanStatusText.Text = "Searching USB and Bluetooth for 5 seconds…";
+        ConnectSelectedPrinterButton.IsEnabled = false;
+        try
+        {
+            var candidates = await _printerSession.ScanAsync(TimeSpan.FromSeconds(5), _windowLifetime.Token);
+            PrinterCandidatesList.ItemsSource = candidates;
+            PrinterCandidatesList.SelectedIndex = candidates.Count > 0 ? 0 : -1;
+            PrinterScanStatusText.Text = candidates.Count == 0
+                ? "No SUPVAN/KATASYMBOL label maker found."
+                : $"Found {candidates.Count} label maker{(candidates.Count == 1 ? string.Empty : "s")}.";
+            ConnectSelectedPrinterButton.IsEnabled = candidates.Count > 0;
+            StatusText.Text = PrinterScanStatusText.Text;
+        }
+        catch (OperationCanceledException)
+        {
+            PrinterScanStatusText.Text = "Search cancelled.";
+        }
+        catch (Exception exception)
+        {
+            PrinterScanStatusText.Text = exception.Message;
+            StatusText.Text = "Printer search failed.";
+        }
+    }
+
+    private async void ConnectSelectedPrinter_Click(object sender, RoutedEventArgs e)
+    {
+        if (PrinterCandidatesList.SelectedItem is PrinterCandidate candidate)
+        {
+            await TryConnectPrinterAsync(candidate);
+        }
+    }
+
+    private async void RetryPrinter_Click(object sender, RoutedEventArgs e)
+    {
+        if (_printerSession.ActivePrinter is { } candidate)
+        {
+            await TryConnectPrinterAsync(candidate);
+        }
+    }
+
+    private async Task TryConnectPrinterAsync(PrinterCandidate candidate)
+    {
+        ConnectSelectedPrinterButton.IsEnabled = false;
+        RetryPrinterButton.IsEnabled = false;
+        try
+        {
+            await ConnectPrinterAsync(candidate);
+            PrinterCandidatesPanel.Visibility = Visibility.Collapsed;
+        }
+        catch (OperationCanceledException)
+        {
+            StatusText.Text = "Printer connection cancelled.";
+        }
+        catch (Exception exception)
+        {
+            MessageBox.Show(this, exception.Message, "Could not connect", MessageBoxButton.OK, MessageBoxImage.Warning);
+        }
+        finally
+        {
+            ConnectSelectedPrinterButton.IsEnabled = PrinterCandidatesList.Items.Count > 0;
+            RetryPrinterButton.IsEnabled = true;
+        }
+    }
+
+    private async Task ConnectPrinterAsync(PrinterCandidate candidate)
+    {
+        StatusText.Text = $"Connecting to {candidate.DisplayName}…";
+        await _printerSession.ConnectAsync(candidate, _windowLifetime.Token);
+        _settings.LastPrinter = RememberedPrinter.FromCandidate(candidate);
+        await _settingsService.SaveAsync(_settings, _windowLifetime.Token);
+        StatusText.Text = $"Connected to {candidate.DisplayName}.";
+        UpdatePrinterPanels();
+    }
+
+    private async void DisconnectPrinter_Click(object sender, RoutedEventArgs e)
+    {
+        await _printerSession.DisconnectAsync();
+        StatusText.Text = "Label maker disconnected; cached media was cleared.";
+    }
+
+    private async void ForgetPrinter_Click(object sender, RoutedEventArgs e)
+    {
+        await _printerSession.DisconnectAsync(forget: true);
+        _settings.LastPrinter = null;
+        await _settingsService.SaveAsync(_settings, _windowLifetime.Token);
+        StatusText.Text = "Forgot the remembered label maker.";
+        UpdatePrinterPanels();
+    }
+
+    private async void RefreshMedia_Click(object sender, RoutedEventArgs e)
+    {
+        try
+        {
+            await _printerSession.RefreshAsync(_windowLifetime.Token);
+            StatusText.Text = "Printer health and installed media refreshed.";
+            HandleAutomaticMediaChange();
+        }
+        catch (Exception exception)
+        {
+            StatusText.Text = "Media refresh failed.";
+            MessageBox.Show(this, exception.Message, "Media refresh failed", MessageBoxButton.OK, MessageBoxImage.Warning);
+        }
+    }
+
+    private void UpdatePrinterPanels()
+    {
+        var candidate = _printerSession.ActivePrinter;
+        var information = _printerSession.DeviceInformation;
+        var health = _printerSession.Health;
+        var media = _printerSession.Media;
+
+        PrinterConnectionText.Text = _printerSession.ConnectionState switch
+        {
+            PrinterConnectionState.Scanning => "Searching…",
+            PrinterConnectionState.Connecting => "Connecting…",
+            PrinterConnectionState.Reading => "Reading printer…",
+            PrinterConnectionState.Ready => "Connected",
+            PrinterConnectionState.Faulted => "Connection problem",
+            _ => "Disconnected"
+        };
+        PrinterIdentityText.Text = candidate is null
+            ? "No label maker selected."
+            : information is null
+                ? $"{candidate.DisplayName} · {candidate.TransportDescription}"
+                : $"{information.ProtocolModel ?? candidate.DisplayName} · {candidate.TransportDescription}\n" +
+                  $"FW {information.FirmwareVersion?.ToString() ?? "?"} · {information.DotsPerMillimeter?.ToString("0.##") ?? "?"} dots/mm · " +
+                  $"{information.PrintheadDots?.ToString() ?? "?"} head dots";
+
+        if (candidate?.Transport == PrinterTransport.UsbHid)
+        {
+            PrinterHealthText.Text = "Live USB health interrogation is unavailable. Direct printing remains experimental.";
+        }
+        else if (health is null)
+        {
+            PrinterHealthText.Text = _printerSession.LastError ?? "Connect the printer to read hardware health.";
+        }
+        else
+        {
+            var hardwareState = new List<string>();
+            if (health.CoverOpen) hardwareState.Add("cover open");
+            if (health.LowBattery) hardwareState.Add("low battery");
+            if (health.PrintheadTooHot) hardwareState.Add("printhead too hot");
+            if (health.IsPrinting) hardwareState.Add("printing");
+            else if (health.IsBusy) hardwareState.Add("busy");
+            PrinterHealthText.Text = hardwareState.Count == 0
+                ? $"Hardware ready · print count {health.PrintCount?.ToString() ?? "?"} · checked {health.ReadAt:T}"
+                : $"Hardware: {string.Join(", ", hardwareState)} · checked {health.ReadAt:T}";
+        }
+
+        MediaStateText.Text = media.State switch
+        {
+            MediaReadState.Reading => "Reading…",
+            MediaReadState.Ready => "Installed",
+            MediaReadState.Absent => "No media",
+            MediaReadState.Unsupported => "Unsupported media",
+            MediaReadState.Faulted => "Media read failed",
+            _ => candidate?.Transport == PrinterTransport.UsbHid ? "Unverified" : "Unknown"
+        };
+        if (candidate?.Transport == PrinterTransport.UsbHid)
+        {
+            MediaInformationText.Text = "Etikra cannot yet interrogate installed USB media. Enter dimensions manually and review the warning before printing.";
+        }
+        else if (media.Material is not { } material)
+        {
+            MediaInformationText.Text = media.Error ?? "No current installed-media information. Stale readings are never retained.";
+        }
+        else
+        {
+            var printableWidth = information?.PrintheadWidthMm;
+            var tapeEdgeMargin = printableWidth is double headWidth ? Math.Max(0, (material.WidthMm - headWidth) / 2) : 0;
+            MediaInformationText.Text =
+                $"{(material.IsContinuous ? "Continuous tape" : "Fixed-size labels")} · {material.GeometryDescription}\n" +
+                $"Printable width {printableWidth?.ToString("0.#") ?? "?"} mm" +
+                (tapeEdgeMargin > 0 ? $" · {tapeEdgeMargin:0.#} mm tape-edge margins" : string.Empty) +
+                $"\nLabel serial {material.LabelSerial} · read {media.ReadAt:T}" +
+                (_currentDocument is not null && !MediaCompatibility.IsCompatible(_document.MediaRequirement, material)
+                    ? "\nCurrent label is not bound to compatible media. Use the action below to resolve it."
+                    : string.Empty);
+        }
+
+        var hasReadyMedia = media is { State: MediaReadState.Ready, Material: not null };
+        RefreshMediaButton.IsEnabled = !_isPrinting && _printerSession.ConnectionState == PrinterConnectionState.Ready &&
+                                       candidate?.Transport == PrinterTransport.BluetoothLe;
+        UseInstalledMediaButton.IsEnabled = hasReadyMedia;
+        EmptyUseMediaButton.IsEnabled = hasReadyMedia;
+        if (media.Material is { } buttonMaterial)
+        {
+            var buttonText = buttonMaterial.IsContinuous ? "Use tape width / bind label" : "Use installed media / bind label";
+            UseInstalledMediaButton.Content = buttonText;
+            EmptyUseMediaButton.Content = buttonText;
+            EmptyWorkspaceMessage.Text = $"Installed: {buttonMaterial.GeometryDescription}. Create a blank label from it or choose another size.";
+        }
+        else
+        {
+            UseInstalledMediaButton.Content = "Use installed media";
+            EmptyUseMediaButton.Content = "Use installed media";
+            EmptyWorkspaceMessage.Text = "No label is open. Connect a label maker, use a custom size, or open an existing file.";
+        }
+
+        RetryPrinterButton.Visibility = candidate is not null && _printerSession.ConnectionState is PrinterConnectionState.Faulted or PrinterConnectionState.Disconnected
+            ? Visibility.Visible : Visibility.Collapsed;
+        DisconnectPrinterButton.Visibility = candidate is not null && _printerSession.ConnectionState is PrinterConnectionState.Connecting or PrinterConnectionState.Ready or PrinterConnectionState.Reading
+            ? Visibility.Visible : Visibility.Collapsed;
+        ForgetPrinterButton.Visibility = candidate is not null ? Visibility.Visible : Visibility.Collapsed;
+
+        DiagnosticsText.Text = candidate is null
+            ? "No live diagnostics."
+            : $"id: {candidate.Id}\naddress: {(candidate.BluetoothAddress is ulong address ? BleDiscovery.FormatAddress(address) : "n/a")}\n" +
+              $"ATT MTU: {information?.AttMtu.ToString() ?? "n/a"}\nwrite: {information?.CommandWriteMode ?? "n/a"}\n" +
+              $"media raw type: {media.Material?.LabelType.ToString() ?? "n/a"}\n" +
+              $"status raw: {health?.RawStatus?.ToString() ?? "n/a"}\n" +
+              $"material raw: {media.Material?.RawHex ?? "n/a"}";
+
+        if (_currentDocument is not null)
+        {
             RenderDesign();
+        }
+        UpdateReadiness();
+    }
+
+    private void HandleAutomaticMediaChange()
+    {
+        if (_currentDocument is null || !_documentCreatedFromMedia || _printerSession.Media.Material is not { } material ||
+            !DocumentMediaAdapter.CanAutoAdapt(_document, _documentPristine, material))
+        {
             return;
         }
 
-        var material = information.Material;
-        var resolution = information.DotsPerMillimeter is double dpmm
-            ? $"{dpmm:0.##} dots/mm ({information.Dpi:0.#} dpi)"
-            : "resolution not returned";
-        var blockingErrors = information.Status.BlockingErrors(ignoreDirectThermalRibbonEnd: true);
-        var status = blockingErrors.Count > 0
-            ? string.Join(", ", blockingErrors)
-            : information.Status.RibbonEnd
-                ? "ready · direct-thermal ribbon flag ignored"
-                : "ready";
-        PrinterInformationText.Text =
-            $"Model {information.ProtocolDeviceName ?? "unknown"} · FW {information.FirmwareVersion?.ToString() ?? "?"} · revision raw {information.ProtocolRevisionRawHex ?? "?"}\n" +
-            $"Loaded: {material.GeometryDescription} · editor {(material.IsContinuous ? $"variable length × {material.WidthMm} mm" : $"{material.HeightMm} × {material.WidthMm} mm")} · raw type {material.LabelType}\n" +
-            $"Firmware counter {material.FirmwareCounter?.ToString() ?? "?"} (meaning unverified) · {resolution} · status {status}";
-        UseLoadedMediaButton.Content = material.IsContinuous
-            ? "Use loaded tape width (keep length)"
-            : "Use loaded media size";
-        UseLoadedMediaButton.Visibility = material.HasPlausibleGeometry ? Visibility.Visible : Visibility.Collapsed;
-        RenderDesign();
+        ApplyMediaToDocument(material, preserveContinuousLength: true);
+        _documentPristine = true;
+        StatusText.Text = "Untouched blank label adapted to the newly installed media.";
+    }
+
+    private void UpdateDocumentMediaBindingText()
+    {
+        if (_currentDocument is null)
+        {
+            return;
+        }
+
+        DocumentMediaBindingText.Text = _document.MediaRequirement switch
+        {
+            { Kind: LabelMediaKind.Continuous, TapeWidthMm: var width } => $"Bound to {width:0.#} mm continuous tape · length is document-controlled",
+            { Kind: LabelMediaKind.Fixed, TapeWidthMm: var width, FixedLengthMm: var length, GapMm: var gap } =>
+                $"Bound to {width:0.#} × {length:0.#} mm fixed media · {gap:0.#} mm gap",
+            _ => "Custom/unbound label · bind compatible installed media before Bluetooth printing"
+        };
+    }
+
+    private void UpdateReadiness()
+    {
+        if (!IsInitialized || ReadinessText is null)
+        {
+            return;
+        }
+
+        var readiness = PrintSafety.Evaluate(
+            _currentDocument,
+            _printerSession.ActivePrinter,
+            _printerSession.ConnectionState,
+            _printerSession.Health,
+            _printerSession.Media,
+            _printerSession.DeviceInformation);
+        ReadinessText.Text = string.Join("\n", readiness.Checks.Select(check =>
+            $"{(check.Level == ReadinessLevel.Ready ? "✓" : check.Level == ReadinessLevel.Warning ? "⚠" : "●")} {check.Name} — {check.Message}"));
+        PrintButton.IsEnabled = readiness.CanPrint && !_isPrinting;
     }
 
     private void AddPrintSafeAreaGuide()
@@ -707,19 +999,14 @@ public partial class MainWindow : Window
 
     private (double HorizontalMm, double VerticalMm)? GetPrintSafeMargins()
     {
-        if (PrinterCombo.SelectedItem is not PrinterDevice
-            {
-                Profile: { } profile,
-                BluetoothInformation: { DotsPerMillimeter: double dotsPerMillimeter } information
-            })
+        if (_currentDocument is null ||
+            _printerSession.ActivePrinter is not { Profile: { } profile } ||
+            _printerSession.DeviceInformation?.DotsPerMillimeter is not double dotsPerMillimeter)
         {
             return null;
         }
 
-        var feedMarginMm = SupvanRasterEncoder.PageMarginDots / dotsPerMillimeter;
-        var printheadWidthMm = profile.PrintheadDots / dotsPerMillimeter;
-        var tapeEdgeMarginMm = Math.Max(feedMarginMm, (information.Material.WidthMm - printheadWidthMm) / 2);
-        return (feedMarginMm, tapeEdgeMarginMm);
+        return PrintSafety.GetE12Margins(_document, profile, dotsPerMillimeter);
     }
 
     private void UpdatePrintRasterPreview()
@@ -731,11 +1018,18 @@ public partial class MainWindow : Window
 
         try
         {
-            var dpi = PrinterCombo.SelectedItem is PrinterDevice { BluetoothInformation.Dpi: double liveDpi }
+            if (_currentDocument is null)
+            {
+                PrintRasterPreview.Source = null;
+                PrintRasterPreviewCaption.Text = "Create a label to see its thermal-dot preview.";
+                return;
+            }
+
+            var dpi = _printerSession.DeviceInformation?.Dpi is double liveDpi
                 ? (int)Math.Round(liveDpi)
-                : (PrinterCombo.SelectedItem as PrinterDevice)?.Profile?.Dpi ?? 203;
+                : _printerSession.ActivePrinter?.Profile?.Dpi ?? 203;
             PrintRasterPreview.Source = LabelRenderer.RenderMonochromePreview(_document, dpi);
-            if (PrinterCombo.SelectedItem is PrinterDevice { BluetoothInformation.DotsPerMillimeter: double dotsPerMillimeter } &&
+            if (_printerSession.DeviceInformation?.DotsPerMillimeter is double dotsPerMillimeter &&
                 GetPrintSafeMargins() is { } margins)
             {
                 PrintRasterPreviewCaption.Text =
@@ -756,79 +1050,184 @@ public partial class MainWindow : Window
 
     private void UseLoadedMedia_Click(object sender, RoutedEventArgs e)
     {
-        if (PrinterCombo.SelectedItem is not PrinterDevice { BluetoothInformation.Material: { HasPlausibleGeometry: true } material })
+        if (_printerSession.Media is not { State: MediaReadState.Ready, Material: { } material })
         {
             return;
         }
 
-        if (!material.IsContinuous)
+        if (_currentDocument is null)
         {
-            _document.WidthMm = material.HeightMm;
+            var length = material.IsContinuous && TryReadNumber(NewLabelLengthBox.Text, out var requestedLength)
+                ? requestedLength
+                : material.HeightMm;
+            _currentDocument = new LabelDocument
+            {
+                Name = "Untitled label",
+                WidthMm = length,
+                HeightMm = material.WidthMm,
+                MediaRequirement = MediaCompatibility.ToRequirement(material)
+            };
+            _currentPath = null;
+            _isDirty = true;
+            _documentPristine = true;
+            _documentCreatedFromMedia = true;
+            LoadDocumentIntoEditor();
+            StatusText.Text = $"Created blank label from {material.GeometryDescription}.";
+            return;
         }
-        _document.HeightMm = material.WidthMm;
 
-        foreach (var element in _document.Elements)
+        if (MediaCompatibility.IsCompatible(_document.MediaRequirement, material) &&
+            Math.Abs(_document.HeightMm - material.WidthMm) <= 0.1 &&
+            (material.IsContinuous || Math.Abs(_document.WidthMm - material.HeightMm) <= 0.1))
         {
-            element.WidthMm = Math.Min(element.WidthMm, _document.WidthMm);
-            element.HeightMm = Math.Min(element.HeightMm, _document.HeightMm);
-            element.XMm = Math.Min(element.XMm, Math.Max(0, _document.WidthMm - element.WidthMm));
-            element.YMm = Math.Min(element.YMm, Math.Max(0, _document.HeightMm - element.HeightMm));
+            StatusText.Text = "This label already matches the installed media.";
+            return;
         }
+
+        var geometryMatches = Math.Abs(_document.HeightMm - material.WidthMm) <= 0.1 &&
+                              (material.IsContinuous || Math.Abs(_document.WidthMm - material.HeightMm) <= 0.1);
+        if (_document.MediaRequirement is null && geometryMatches)
+        {
+            _document.MediaRequirement = MediaCompatibility.ToRequirement(material);
+            _documentCreatedFromMedia = true;
+            MarkDirty();
+            UpdateDocumentMediaBindingText();
+            StatusText.Text = "Bound the current label to compatible installed media.";
+            return;
+        }
+
+        if (DocumentMediaAdapter.CanAutoAdapt(_document, _documentPristine, material))
+        {
+            ApplyMediaToDocument(material, preserveContinuousLength: true);
+            _documentPristine = true;
+            _documentCreatedFromMedia = true;
+            StatusText.Text = "Untouched blank label adapted to installed media.";
+            return;
+        }
+
+        var answer = MessageBox.Show(
+            this,
+            "The installed media differs from this label.\n\nYes: resize and rebind the current label (elements are clamped into the physical canvas).\nNo: replace it with a new blank label.\nCancel: keep the current incompatible label.",
+            "Installed media changed",
+            MessageBoxButton.YesNoCancel,
+            MessageBoxImage.Warning);
+        if (answer == MessageBoxResult.Cancel)
+        {
+            return;
+        }
+
+        if (answer == MessageBoxResult.No)
+        {
+            _currentDocument = new LabelDocument
+            {
+                Name = "Untitled label",
+                WidthMm = material.IsContinuous && TryReadNumber(NewLabelLengthBox.Text, out var requestedLength) ? requestedLength : material.HeightMm,
+                HeightMm = material.WidthMm,
+                MediaRequirement = MediaCompatibility.ToRequirement(material)
+            };
+            _currentPath = null;
+            _documentPristine = true;
+            _documentCreatedFromMedia = true;
+        }
+        else
+        {
+            ApplyMediaToDocument(material, preserveContinuousLength: true);
+            _documentPristine = false;
+            _documentCreatedFromMedia = true;
+        }
+
+        _isDirty = true;
+        LoadDocumentIntoEditor();
+        StatusText.Text = answer == MessageBoxResult.No
+            ? "Created a new blank label for the installed media."
+            : "Resized and rebound the current label; review artwork and safe-area warnings.";
+    }
+
+    private void ApplyMediaToDocument(BleMaterialReport material, bool preserveContinuousLength)
+    {
+        if (_currentDocument is null)
+        {
+            return;
+        }
+
+        DocumentMediaAdapter.ResizeAndBind(_document, material, preserveContinuousLength);
 
         DocumentWidthBox.Text = FormatNumber(_document.WidthMm);
         DocumentHeightBox.Text = FormatNumber(_document.HeightMm);
         MarkDirty();
         RenderDesign();
         UpdateInspector();
-        StatusText.Text = material.IsContinuous
-            ? $"Tape width set to {material.WidthMm} mm; design length remains {_document.WidthMm:0.##} mm."
-            : $"Design resized to {material.HeightMm} × {material.WidthMm} mm using printer-reported {material.GeometryDescription}.";
+        UpdateDocumentMediaBindingText();
+    }
+
+    private async void CreateCustomLabel_Click(object sender, RoutedEventArgs e)
+    {
+        if (!TryReadNumber(NewLabelLengthBox.Text, out var length) ||
+            !TryReadNumber(NewLabelWidthBox.Text, out var width))
+        {
+            MessageBox.Show(this, "Enter valid label dimensions in millimetres.", "Custom label", MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
+
+        if (!await ConfirmDiscardAsync())
+        {
+            return;
+        }
+
+        _currentDocument = new LabelDocument { Name = "Untitled label", WidthMm = length, HeightMm = width };
+        _currentPath = null;
+        _isDirty = true;
+        _documentPristine = true;
+        _documentCreatedFromMedia = false;
+        LoadDocumentIntoEditor();
+        StatusText.Text = "Created an unbound custom-size label.";
     }
 
     private async void Print_Click(object sender, RoutedEventArgs e)
     {
-        if (PrinterCombo.SelectedItem is not PrinterDevice device)
+        if (_currentDocument is null || _printerSession.ActivePrinter is not { } printer)
         {
-            MessageBox.Show(this, "Choose a printer first.", "Print label", MessageBoxButton.OK, MessageBoxImage.Information);
+            MessageBox.Show(this, "Create a label and connect a printer first.", "Print label", MessageBoxButton.OK, MessageBoxImage.Information);
             return;
         }
 
-        if (!device.IsSupported)
+        var readiness = PrintSafety.Evaluate(
+            _document,
+            printer,
+            _printerSession.ConnectionState,
+            _printerSession.Health,
+            _printerSession.Media,
+            _printerSession.DeviceInformation);
+        if (!readiness.CanPrint)
         {
-            MessageBox.Show(this, "This USB model is visible, but Etikra has no verified profile for its PID. No data was sent.", "Unsupported printer", MessageBoxButton.OK, MessageBoxImage.Warning);
+            var reason = readiness.Checks.First(check => check.Level == ReadinessLevel.Blocking);
+            MessageBox.Show(this, $"{reason.Name}: {reason.Message}", "Print is not ready", MessageBoxButton.OK, MessageBoxImage.Warning);
             return;
         }
 
-        if (!device.IsMock)
+        var isUsb = printer.Transport == PrinterTransport.UsbHid;
+        var confirmation = MessageBox.Show(
+            this,
+            isUsb
+                ? $"Send this label directly to {printer.DisplayName} over experimental USB HID?\n\nEtikra cannot interrogate installed USB media. Confirm that the manually entered dimensions match the loaded stock."
+                : $"Send this label directly to {printer.DisplayName} over Bluetooth?\n\nEtikra will re-read health and installed media on this same connection before sending any raster bytes.",
+            isUsb ? "Experimental USB print" : "Bluetooth print",
+            MessageBoxButton.OKCancel,
+            MessageBoxImage.Warning);
+        if (confirmation != MessageBoxResult.OK)
         {
-            var connection = device.IsBluetooth ? "Bluetooth" : "USB";
-            var media = device.BluetoothInformation?.Material.GeometryDescription;
-            var answer = MessageBox.Show(
-                this,
-                $"Send this label directly to {device.DisplayName} over {connection}?" +
-                (media is null ? string.Empty : $"\n\nThe printer currently reports {media}; Etikra will query it again before sending raster data.") +
-                $"\n\nClose the cover and keep the printer connected. This backend is based on independent reverse engineering.",
-                $"Direct {connection} print",
-                MessageBoxButton.OKCancel,
-                MessageBoxImage.Warning);
-            if (answer != MessageBoxResult.OK)
-            {
-                return;
-            }
+            return;
         }
 
+        _isPrinting = true;
         PrintButton.IsEnabled = false;
-        RefreshPrintersButton.IsEnabled = false;
+        RefreshMediaButton.IsEnabled = false;
         try
         {
             var progress = new Progress<string>(message => StatusText.Text = message);
-            var backend = PrinterBackendFactory.Create(device);
-            var result = await backend.PrintAsync(_document, (byte)DensitySlider.Value, progress, CancellationToken.None);
+            var printSnapshot = DocumentService.CreateSnapshot(_document);
+            var result = await _printerSession.PrintAsync(printSnapshot, (byte)DensitySlider.Value, progress, _windowLifetime.Token);
             StatusText.Text = result;
-            if (device.IsMock)
-            {
-                MessageBox.Show(this, $"Mock print saved to:\n{result}", "Print complete", MessageBoxButton.OK, MessageBoxImage.Information);
-            }
         }
         catch (Exception exception)
         {
@@ -837,8 +1236,45 @@ public partial class MainWindow : Window
         }
         finally
         {
-            PrintButton.IsEnabled = true;
-            RefreshPrintersButton.IsEnabled = true;
+            _isPrinting = false;
+            UpdatePrinterPanels();
+        }
+    }
+
+    private async void MockPrint_Click(object sender, RoutedEventArgs e)
+    {
+        if (_currentDocument is null)
+        {
+            return;
+        }
+
+        try
+        {
+            var progress = new Progress<string>(message => StatusText.Text = message);
+            var path = await new MockPrinterBackend().PrintAsync(DocumentService.CreateSnapshot(_document), (byte)DensitySlider.Value, progress, _windowLifetime.Token);
+            MessageBox.Show(this, $"Mock print saved to:\n{path}", "Mock print complete", MessageBoxButton.OK, MessageBoxImage.Information);
+        }
+        catch (Exception exception)
+        {
+            MessageBox.Show(this, exception.Message, "Mock print failed", MessageBoxButton.OK, MessageBoxImage.Error);
+        }
+    }
+
+    private async void DensitySlider_ValueChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
+    {
+        if (!IsLoaded)
+        {
+            return;
+        }
+
+        _settings.Density = (byte)e.NewValue;
+        try
+        {
+            await _settingsService.SaveAsync(_settings, _windowLifetime.Token);
+        }
+        catch
+        {
+            // A density preference failure must not interrupt editing or printing.
         }
     }
 
@@ -890,7 +1326,7 @@ public partial class MainWindow : Window
 
     private async Task<bool> ConfirmDiscardAsync()
     {
-        if (!_isDirty)
+        if (_currentDocument is null || !_isDirty)
         {
             return true;
         }
@@ -907,13 +1343,42 @@ public partial class MainWindow : Window
     private void MarkDirty()
     {
         _isDirty = true;
+        _documentPristine = false;
         UpdateTitle();
+        UpdateDocumentMediaBindingText();
+        UpdateReadiness();
     }
 
     private void UpdateTitle()
     {
+        if (_currentDocument is null)
+        {
+            Title = "Etikra";
+            return;
+        }
+
         Title = $"{(_isDirty ? "• " : string.Empty)}{_document.Name} — Etikra";
         DocumentNameBox.Text = _document.Name;
+    }
+
+    private async void Window_Closing(object? sender, CancelEventArgs e)
+    {
+        if (_closeConfirmed)
+        {
+            return;
+        }
+
+        e.Cancel = true;
+        if (!await ConfirmDiscardAsync())
+        {
+            return;
+        }
+
+        _closeConfirmed = true;
+        _windowLifetime.Cancel();
+        _printerSession.StateChanged -= PrinterSession_StateChanged;
+        await _printerSession.DisposeAsync();
+        Close();
     }
 
     private static bool TryReadNumber(string text, out double value) =>

@@ -36,7 +36,7 @@ internal static class Program
             ("Code 128-B checksum", Code128Checksum),
             ("SUPVAN print-buffer header", PrintBufferHeader),
             ("LZMA firmware parameters and round trip", LzmaRoundTrip),
-            ("End-to-end starter-label raster", StarterLabelRaster),
+            ("End-to-end sample-label raster", SampleLabelRaster),
             ("Known USB model registry", ModelRegistry),
             ("E12 BLE advertisement signature", E12AdvertisementSignature),
             ("E12 BLE command frame", E12CommandFrame),
@@ -47,7 +47,13 @@ internal static class Program
             ("E12 15 mm tape centered on 12 mm head", E12ContinuousTapeCenterCrop),
             ("E12 landscape raster rotation", E12LandscapeRotation),
             ("E12 direct-thermal ribbon flag", E12RibbonFlag),
-            ("Native monochrome print preview", MonochromePrintPreview)
+            ("Native monochrome print preview", MonochromePrintPreview),
+            ("Settings persistence excludes media", SettingsPersistence),
+            ("Label v1 migration and v2 media requirement", DocumentMediaMigration),
+            ("Media compatibility and pristine adaptation", MediaCompatibilityAndAdaptation),
+            ("Print readiness separates BLE and USB safety", PrintReadinessStates),
+            ("Persistent session refresh and pre-print media gate", PrinterSessionLifecycle),
+            ("Session connection cancellation and fault state", PrinterSessionCancellationAndFault)
         };
 
         try
@@ -275,10 +281,10 @@ internal static class Program
         True(raw.SequenceEqual(output.ToArray()), "LZMA round trip");
     }
 
-    private static void StarterLabelRaster()
+    private static void SampleLabelRaster()
     {
         var profile = PrinterProfiles.Find(0x2073) ?? throw new Exception("T50M Pro profile missing");
-        var data = SupvanRasterEncoder.Encode(DocumentService.CreateStarterDocument(), profile, 7);
+        var data = SupvanRasterEncoder.Encode(DocumentService.CreateSampleDocument(), profile, 7);
         True(data.BufferCount >= 1, "at least one buffer");
         True(data.Compressed.Length is > 13 and <= ushort.MaxValue, "valid compressed page length");
         Equal(203, profile.Dpi, "T50 DPI");
@@ -447,6 +453,280 @@ internal static class Program
         var pixels = new byte[preview.PixelWidth * preview.PixelHeight];
         preview.CopyPixels(pixels, preview.PixelWidth, 0);
         True(pixels.All(value => value == 255), "blank preview should be white");
+    }
+
+    private static void SettingsPersistence()
+    {
+        var folder = Path.Combine(Path.GetTempPath(), $"etikra-settings-{Guid.NewGuid():N}");
+        var path = Path.Combine(folder, "settings.json");
+        try
+        {
+            var service = new SettingsService(path);
+            var candidate = new PrinterCandidate(
+                "ble:A49340B01CBA",
+                "E12 test",
+                PrinterTransport.BluetoothLe,
+                PrinterProfiles.E12,
+                BluetoothAddress: 0xA49340B01CBA);
+            var settings = new EtikraSettings
+            {
+                Density = 9,
+                LastPrinter = RememberedPrinter.FromCandidate(candidate)
+            };
+            service.SaveAsync(settings).GetAwaiter().GetResult();
+            var loaded = service.LoadAsync().GetAwaiter().GetResult();
+            Equal((byte)9, loaded.Density, "density round trip");
+            Equal(candidate.BluetoothAddress, loaded.LastPrinter?.BluetoothAddress, "remembered BLE address");
+            True(!File.ReadAllText(path).Contains("media", StringComparison.OrdinalIgnoreCase), "settings must not persist installed media");
+
+            File.WriteAllText(path, "{ invalid");
+            loaded = service.LoadAsync().GetAwaiter().GetResult();
+            True(loaded.LastPrinter is null, "corrupt settings should fall back safely");
+        }
+        finally
+        {
+            if (Directory.Exists(folder))
+            {
+                Directory.Delete(folder, true);
+            }
+        }
+    }
+
+    private static void DocumentMediaMigration()
+    {
+        var folder = Path.Combine(Path.GetTempPath(), $"etikra-document-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(folder);
+        var path = Path.Combine(folder, "legacy.etikra");
+        try
+        {
+            File.WriteAllText(path, """
+                { "FormatVersion": 1, "Name": "Legacy", "WidthMm": 40, "HeightMm": 12, "Elements": [] }
+                """);
+            var legacy = DocumentService.LoadAsync(path).GetAwaiter().GetResult();
+            Equal(1, legacy.FormatVersion, "legacy format retained until save");
+            True(legacy.MediaRequirement is null, "legacy document should load unbound");
+
+            legacy.MediaRequirement = new LabelMediaRequirement
+            {
+                Kind = LabelMediaKind.Continuous,
+                TapeWidthMm = 15
+            };
+            DocumentService.SaveAsync(legacy, path).GetAwaiter().GetResult();
+            var upgraded = DocumentService.LoadAsync(path).GetAwaiter().GetResult();
+            Equal(2, upgraded.FormatVersion, "save should upgrade to format v2");
+            Equal(LabelMediaKind.Continuous, upgraded.MediaRequirement?.Kind, "continuous media kind round trip");
+            Equal(15d, upgraded.MediaRequirement?.TapeWidthMm, "tape width round trip");
+        }
+        finally
+        {
+            Directory.Delete(folder, true);
+        }
+    }
+
+    private static void MediaCompatibilityAndAdaptation()
+    {
+        var fixedMedia = CreateMaterial(rawType: 1, width: 12, height: 40, gap: 3, serial: 25004);
+        var equivalentRoll = CreateMaterial(rawType: 1, width: 12, height: 40, gap: 3, serial: 25005);
+        var continuous = CreateMaterial(rawType: 0, width: 15, height: 50, gap: 0, serial: 25001);
+        var requirement = MediaCompatibility.ToRequirement(fixedMedia);
+        True(MediaCompatibility.IsCompatible(requirement, equivalentRoll), "equivalent replacement roll should remain compatible");
+        True(!MediaCompatibility.IsCompatible(requirement, continuous), "different media kind/geometry should conflict");
+
+        var document = new LabelDocument
+        {
+            WidthMm = 40,
+            HeightMm = 12,
+            MediaRequirement = requirement
+        };
+        True(DocumentMediaAdapter.CanAutoAdapt(document, true, continuous), "pristine empty document can auto-adapt");
+        document.Elements.Add(new LabelElement { Kind = LabelElementKind.Text, XMm = 35, YMm = 10, WidthMm = 12, HeightMm = 8 });
+        True(!DocumentMediaAdapter.CanAutoAdapt(document, true, continuous), "document with artwork must not auto-adapt");
+        DocumentMediaAdapter.ResizeAndBind(document, continuous, preserveContinuousLength: true);
+        Equal(40d, document.WidthMm, "continuous adaptation preserves requested length");
+        Equal(15d, document.HeightMm, "continuous adaptation uses detected tape width");
+        True(document.Elements.All(element => element.XMm + element.WidthMm <= document.WidthMm && element.YMm + element.HeightMm <= document.HeightMm),
+            "explicit resize should clamp artwork into physical canvas");
+    }
+
+    private static void PrintReadinessStates()
+    {
+        var document = new LabelDocument { WidthMm = 40, HeightMm = 12 };
+        var usb = new PrinterCandidate("usb", "USB test", PrinterTransport.UsbHid, new PrinterProfile("USB", 1, 203, 96, "test"), "path");
+        var usbReady = PrintSafety.Evaluate(document, usb, PrinterConnectionState.Ready, null, InstalledMediaSnapshot.Unknown, null);
+        True(usbReady.CanPrint, "active supported USB path should be warning-only");
+        True(usbReady.Checks.Count(check => check.Level == ReadinessLevel.Warning) == 2, "USB should warn for health and media");
+        var usbDisconnected = PrintSafety.Evaluate(document, usb, PrinterConnectionState.Disconnected, null, InstalledMediaSnapshot.Unknown, null);
+        True(!usbDisconnected.CanPrint, "disconnected USB path must block printing");
+
+        var media = CreateMaterial(1, 12, 40, 3, 25004);
+        document.MediaRequirement = MediaCompatibility.ToRequirement(media);
+        var ble = new PrinterCandidate("ble", "E12", PrinterTransport.BluetoothLe, PrinterProfiles.E12, BluetoothAddress: 1);
+        var health = PrinterHealthSnapshot.FromBle(CreateReadyStatus());
+        var info = CreateDeviceInformation();
+        var bleReady = PrintSafety.Evaluate(document, ble, PrinterConnectionState.Ready, health, InstalledMediaSnapshot.From(media), info);
+        True(bleReady.CanPrint, "matching live BLE media should be print-ready");
+        var absent = PrintSafety.Evaluate(document, ble, PrinterConnectionState.Ready, health, InstalledMediaSnapshot.Absent(), info);
+        True(!absent.CanPrint, "absent BLE media must block printing");
+    }
+
+    private static void PrinterSessionLifecycle()
+    {
+        var fixedMedia = CreateMaterial(1, 12, 40, 3, 25004);
+        var continuous = CreateMaterial(0, 15, 50, 0, 25001);
+        var candidate = new PrinterCandidate("ble:test", "E12 test", PrinterTransport.BluetoothLe, PrinterProfiles.E12, BluetoothAddress: 1);
+        var factory = new FakePrinterTransportFactory(candidate, fixedMedia);
+        using var manager = new AsyncDisposableScope(new PrinterSessionManager(factory));
+        manager.Value.ConnectAsync(candidate).GetAwaiter().GetResult();
+        Equal(PrinterConnectionState.Ready, manager.Value.ConnectionState, "session should become ready");
+        Equal(MediaReadState.Ready, manager.Value.Media.State, "connect should read media");
+
+        var sawClearedMedia = false;
+        manager.Value.StateChanged += (_, _) => sawClearedMedia |= manager.Value.Media.State == MediaReadState.Reading;
+        factory.Current!.Material = continuous;
+        manager.Value.RefreshAsync().GetAwaiter().GetResult();
+        True(sawClearedMedia, "refresh should clear stale media before reading");
+        Equal((byte)15, manager.Value.Media.Material?.WidthMm, "refreshed media width");
+
+        var document = new LabelDocument
+        {
+            WidthMm = 40,
+            HeightMm = 12,
+            MediaRequirement = MediaCompatibility.ToRequirement(fixedMedia)
+        };
+        var blocked = false;
+        try
+        {
+            manager.Value.PrintAsync(document, 7, null).GetAwaiter().GetResult();
+        }
+        catch (InvalidOperationException)
+        {
+            blocked = true;
+        }
+        True(blocked, "pre-print refresh should block incompatible media");
+        Equal(0, factory.Current.PrintCount, "incompatible media must send zero print jobs");
+
+        factory.Material = fixedMedia;
+        factory.Current.RaiseConnectionLost();
+        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(3);
+        while ((factory.ConnectCount < 2 || manager.Value.ConnectionState != PrinterConnectionState.Ready) && DateTime.UtcNow < deadline)
+        {
+            Thread.Sleep(25);
+        }
+        True(factory.ConnectCount >= 2, "connection loss should trigger bounded reconnect");
+        Equal(PrinterConnectionState.Ready, manager.Value.ConnectionState, "reconnected session should return to ready");
+
+        manager.Value.DisconnectAsync().GetAwaiter().GetResult();
+        Equal(MediaReadState.Unknown, manager.Value.Media.State, "disconnect should discard media snapshot");
+        True(manager.Value.DeviceInformation is null, "disconnect should discard device snapshot");
+    }
+
+    private static void PrinterSessionCancellationAndFault()
+    {
+        var candidate = new PrinterCandidate("ble:test", "E12 test", PrinterTransport.BluetoothLe, PrinterProfiles.E12, BluetoothAddress: 1);
+        using (var manager = new AsyncDisposableScope(new PrinterSessionManager(new CancellablePrinterTransportFactory())))
+        {
+            var connect = manager.Value.ConnectAsync(candidate);
+            var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(1);
+            while (manager.Value.ConnectionState != PrinterConnectionState.Connecting && DateTime.UtcNow < deadline)
+            {
+                Thread.Sleep(10);
+            }
+            var disconnect = manager.Value.DisconnectAsync();
+            try
+            {
+                connect.GetAwaiter().GetResult();
+            }
+            catch (OperationCanceledException)
+            {
+                // Expected cancellation is the behavior under test.
+            }
+            disconnect.GetAwaiter().GetResult();
+            Equal(PrinterConnectionState.Disconnected, manager.Value.ConnectionState, "cancelled connection should become disconnected");
+            Equal(MediaReadState.Unknown, manager.Value.Media.State, "cancelled connection must not retain media");
+        }
+
+        using (var manager = new AsyncDisposableScope(new PrinterSessionManager(new FaultingPrinterTransportFactory())))
+        {
+            var failed = false;
+            try
+            {
+                manager.Value.ConnectAsync(candidate).GetAwaiter().GetResult();
+            }
+            catch (IOException)
+            {
+                failed = true;
+            }
+            True(failed, "transport failure should surface to caller");
+            Equal(PrinterConnectionState.Faulted, manager.Value.ConnectionState, "transport failure should enter faulted state");
+            Equal(MediaReadState.Faulted, manager.Value.Media.State, "transport failure should expose a non-stale media fault");
+        }
+    }
+
+    private static BleMaterialReport CreateMaterial(byte rawType, byte width, byte height, byte gap, ushort serial) => new(
+        [], "UID", "CODE", serial, rawType, width, height, gap, null);
+
+    private static BlePrinterStatus CreateReadyStatus() => new(
+        false, false, false, false, false, false, false, false, false, false, false, false, false, 1);
+
+    private static PrinterDeviceInformation CreateDeviceInformation() => new(
+        "E12", "G15", "151225", 1, 8, 96, 251, "WriteWithoutResponse", DateTimeOffset.Now);
+
+    private sealed class FakePrinterTransportFactory(PrinterCandidate candidate, BleMaterialReport material) : IPrinterTransportFactory
+    {
+        public BleMaterialReport Material { get; set; } = material;
+        public FakePrinterTransport? Current { get; private set; }
+        public int ConnectCount { get; private set; }
+
+        public Task<IPrinterSessionTransport> ConnectAsync(PrinterCandidate requested, CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            ConnectCount++;
+            Current = new FakePrinterTransport(candidate, Material);
+            return Task.FromResult<IPrinterSessionTransport>(Current);
+        }
+    }
+
+    private sealed class FakePrinterTransport(PrinterCandidate candidate, BleMaterialReport material) : IPrinterSessionTransport
+    {
+        public PrinterCandidate Candidate => candidate;
+        public BleMaterialReport Material { get; set; } = material;
+        public int PrintCount { get; private set; }
+        public event EventHandler? ConnectionLost;
+
+        public Task<PrinterDeviceInformation> ReadDeviceInformationAsync(CancellationToken cancellationToken) =>
+            Task.FromResult(CreateDeviceInformation());
+        public Task<PrinterHealthSnapshot?> ReadHealthAsync(CancellationToken cancellationToken) =>
+            Task.FromResult<PrinterHealthSnapshot?>(PrinterHealthSnapshot.FromBle(CreateReadyStatus()));
+        public Task<InstalledMediaSnapshot> ReadMediaAsync(CancellationToken cancellationToken) =>
+            Task.FromResult(InstalledMediaSnapshot.From(Material));
+        public Task<string> PrintAsync(LabelDocument document, InstalledMediaSnapshot media, byte density, IProgress<string>? progress, CancellationToken cancellationToken)
+        {
+            PrintCount++;
+            return Task.FromResult("printed");
+        }
+        public void RaiseConnectionLost() => ConnectionLost?.Invoke(this, EventArgs.Empty);
+        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+    }
+
+    private sealed class CancellablePrinterTransportFactory : IPrinterTransportFactory
+    {
+        public async Task<IPrinterSessionTransport> ConnectAsync(PrinterCandidate candidate, CancellationToken cancellationToken)
+        {
+            await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+            throw new InvalidOperationException("Unreachable");
+        }
+    }
+
+    private sealed class FaultingPrinterTransportFactory : IPrinterTransportFactory
+    {
+        public Task<IPrinterSessionTransport> ConnectAsync(PrinterCandidate candidate, CancellationToken cancellationToken) =>
+            Task.FromException<IPrinterSessionTransport>(new IOException("simulated connection failure"));
+    }
+
+    private sealed class AsyncDisposableScope(PrinterSessionManager value) : IDisposable
+    {
+        public PrinterSessionManager Value { get; } = value;
+        public void Dispose() => Value.DisposeAsync().AsTask().GetAwaiter().GetResult();
     }
 
     private static void Equal<T>(T expected, T actual, string label)

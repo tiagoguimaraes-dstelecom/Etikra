@@ -7,7 +7,7 @@ Thank you for helping make closed label-printer hardware more useful.
 1. Install the .NET 10 SDK on Windows.
 2. Run `dotnet build Etikra.slnx`.
 3. Run `dotnet run --project Tests\Etikra.Tests.csproj`.
-4. Use the mock printer for editor work. Do not require physical hardware for unrelated changes.
+4. Use **Save mock PNG** for editor work. Do not require physical hardware for unrelated changes or represent file output as a connected printer.
 
 Keep protocol parsing, raster transformation, transport I/O, and WPF UI concerns separate. Add a deterministic test fixture for every newly decoded field or packet rule.
 

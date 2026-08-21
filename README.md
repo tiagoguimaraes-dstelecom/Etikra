@@ -1,6 +1,6 @@
 # Etikra
 
-Etikra is an open-source Windows label designer for SUPVAN and KATASYMBOL thermal label printers. It is a native C#/.NET 10 WPF application with an offline editor, a safe mock printer, print-ready PNG export, an experimental direct USB HID backend, and a live-tested E12 Bluetooth LE backend.
+Etikra is an open-source Windows label designer for SUPVAN and KATASYMBOL thermal label printers. It is a native C#/.NET 10 WPF application with an offline editor, safe mock-file output, print-ready PNG export, an experimental direct USB HID backend, and a live-tested E12 Bluetooth LE backend.
 
 > Etikra is an independent community project. It is not affiliated with or endorsed by SUPVAN or KATASYMBOL. Direct printing is based on public reverse-engineering work and needs testing on more physical printers.
 
@@ -9,15 +9,18 @@ Etikra is an open-source Windows label designer for SUPVAN and KATASYMBOL therma
 - Millimetre-based label canvas with drag, resize, keyboard nudging, rotation, and numeric positioning.
 - Text, Code 128-B barcodes, rectangles, lines, and embedded PNG/JPEG/BMP images.
 - `.etikra` JSON project files and 300 DPI PNG export.
-- Mock printing to `%LOCALAPPDATA%\Etikra\Mock Prints` without printer hardware.
+- A true empty-workspace startup: create from freshly read media, choose a custom size, or open an existing label without sample artwork or invented label metadata.
+- Safe **Save mock PNG** output to `%LOCALAPPDATA%\Etikra\Mock Prints` without representing file output as physical hardware.
 - Windows USB HID discovery restricted to SUPVAN vendor ID `1820`.
 - Guarded direct USB backend for known T50, T80, G, TP76, TP80, TP86, and SP650 product IDs.
 - Native Windows BLE discovery, persistent GATT notification transport, and E12 printing through `FEE7/FEC1`.
-- Read-before-print interrogation for model, firmware, status, RFID material metadata, loaded width/height/gap/type, and dots/mm.
+- A remembered-printer setup flow and one persistent E12 session with separate device-health and installed-media cards.
+- Fresh media interrogation on connect/reconnect, foreground return, manual refresh, after printing, and immediately before every print. Media is never persisted or reused after disconnect.
 - A loaded-media action plus a hard pre-print geometry recheck. Fixed stock sets both editor dimensions; continuous stock sets the tape width while preserving the user-selected length.
 - A live 1-bit thermal-dot preview and dashed E12 print-safe guide. The feed-end inset is 1 mm; 15 mm tape is centered over the 12 mm head and therefore has a 1.5 mm tape-edge inset. Elements crossing the applicable boundary are blocked before any print bytes are sent.
 - Printer status/error handling for cover-open, missing/empty labels, ribbon faults, thermal faults, and busy states.
-- Dependency-free executable test harness for barcode, raster, buffer, checksum, model, and LZMA verification.
+- Version-2 `.etikra` files remember compatible media kind/geometry without binding to a cartridge RFID or serial; version-1 files remain readable.
+- Dependency-free executable test harness for editor, persistence, session lifecycle, readiness, protocol, raster, checksum, model, and LZMA verification.
 
 ## Hardware status
 
@@ -53,12 +56,12 @@ dotnet run --project Tests\Etikra.Tests.csproj
 
 ## Using Etikra
 
-1. Set the physical label width and height in millimetres, or let a compatible Bluetooth printer report them.
-2. Add elements from the left palette. Drag them on the canvas or edit exact values in the inspector.
-3. Save the editable project as `.etikra` or export a 300 DPI PNG.
-4. Start with **Preview / mock printer**. Etikra writes the rendered output to the local mock-print folder.
-5. For direct USB, connect a supported printer, choose **Refresh USB + Bluetooth**, select it, load the correct media, then print. Etikra shows a confirmation before sending protocol bytes.
-6. For E12 Bluetooth, select the discovered printer and review its live configuration. Choose **Use loaded media size**, or **Use loaded tape width (keep length)** for continuous tape. Etikra queries the printer again and refuses to send raster data if the design width across the tape disagrees.
+1. On first launch, use **Find label maker**, continue with a custom size, or open a saved label. Etikra quietly reconnects to the last successful printer on later launches.
+2. Review the separate **Label maker** health and **Installed media** cards. Use the reported media to create/bind a blank label; continuous tape keeps a user-selected length.
+3. Add elements from the left palette. Drag them on the canvas or edit exact values in the inspector.
+4. Save the editable project as `.etikra`, export a 300 DPI PNG, or use **Save mock PNG** for safe 203 DPI output without hardware.
+5. Review the readiness checklist before physical printing. E12 jobs re-read status and media on the same persistent connection immediately before raster transfer.
+6. USB media interrogation remains unavailable. A supported experimental USB device can print only after an amber warning and explicit confirmation that the manual dimensions match loaded stock.
 
 Etikra rotates the landscape editor raster into the printer's feed coordinates and compensates for the E12's reversed printhead-dot order. The editor therefore matches the physical label instead of exposing the printer's portrait wire orientation.
 

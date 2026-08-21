@@ -147,6 +147,22 @@ public sealed record BlePrinterInformation(
             : null;
 }
 
+public sealed record BleDeviceInformation(
+    string BluetoothName,
+    string? ProtocolDeviceName,
+    string? ProtocolRevision,
+    byte? FirmwareVersion,
+    double? DotsPerMillimeter,
+    ushort AttMtu,
+    GattWriteOption CommandWriteOption,
+    IReadOnlyDictionary<byte, byte[]> RawResponses)
+{
+    public string? ProtocolRevisionRawHex =>
+        RawResponses.TryGetValue(BleProtocol.CommandReadRevision, out var response) && response.Length >= 25
+            ? BleProtocol.FormatHex(response.AsSpan(22, 3))
+            : null;
+}
+
 /// <summary>
 /// Persistent Windows GATT connection for E11/E12-class SUPVAN printers.
 /// Commands use the shared 7E/5A framing; replies arrive as notifications.
@@ -193,6 +209,7 @@ public sealed class BleProtocol : IAsyncDisposable
         _session = session;
         CommandWriteOption = commandWriteOption;
         _notifyCharacteristic.ValueChanged += OnValueChanged;
+        _session.SessionStatusChanged += OnSessionStatusChanged;
     }
 
     public string DeviceName => string.IsNullOrWhiteSpace(_device.Name)
@@ -201,6 +218,7 @@ public sealed class BleProtocol : IAsyncDisposable
 
     public ushort AttMtu => _session.MaxPduSize;
     public GattWriteOption CommandWriteOption { get; }
+    public event EventHandler? ConnectionLost;
 
     public static async Task<BleProtocol> ConnectAsync(ulong address, CancellationToken cancellationToken = default)
     {
@@ -293,10 +311,30 @@ public sealed class BleProtocol : IAsyncDisposable
 
     public async Task<BlePrinterInformation> ReadInformationAsync(CancellationToken cancellationToken = default)
     {
+        var deviceInformation = await ReadDeviceInformationAsync(cancellationToken);
+        var statusResponse = await SendCommandAsync(CommandInquiryStatus, cancellationToken: cancellationToken);
+        var materialResponse = await SendCommandAsync(CommandReturnMaterial, cancellationToken: cancellationToken);
+        var responses = deviceInformation.RawResponses.ToDictionary(pair => pair.Key, pair => pair.Value);
+        responses[CommandInquiryStatus] = statusResponse;
+        responses[CommandReturnMaterial] = materialResponse;
+
+        return new BlePrinterInformation(
+            deviceInformation.BluetoothName,
+            deviceInformation.ProtocolDeviceName,
+            deviceInformation.ProtocolRevision,
+            deviceInformation.FirmwareVersion,
+            deviceInformation.DotsPerMillimeter,
+            deviceInformation.AttMtu,
+            deviceInformation.CommandWriteOption,
+            BlePrinterStatus.Parse(statusResponse),
+            BleMaterialReport.Parse(materialResponse),
+            responses);
+    }
+
+    public async Task<BleDeviceInformation> ReadDeviceInformationAsync(CancellationToken cancellationToken = default)
+    {
         var responses = new Dictionary<byte, byte[]>();
         responses[CommandCheckDevice] = await SendCommandAsync(CommandCheckDevice, cancellationToken: cancellationToken);
-        responses[CommandInquiryStatus] = await SendCommandAsync(CommandInquiryStatus, cancellationToken: cancellationToken);
-        responses[CommandReturnMaterial] = await SendCommandAsync(CommandReturnMaterial, cancellationToken: cancellationToken);
 
         var protocolName = await TryReadTextCommandAsync(CommandReadDeviceName, 22, responses, cancellationToken);
         var revision = await TryReadTextCommandAsync(CommandReadRevision, 22, responses, cancellationToken);
@@ -328,7 +366,7 @@ public sealed class BleProtocol : IAsyncDisposable
             }
         }
 
-        return new BlePrinterInformation(
+        return new BleDeviceInformation(
             DeviceName,
             protocolName,
             revision,
@@ -336,10 +374,14 @@ public sealed class BleProtocol : IAsyncDisposable
             dotsPerMillimeter,
             AttMtu,
             CommandWriteOption,
-            BlePrinterStatus.Parse(responses[CommandInquiryStatus]),
-            BleMaterialReport.Parse(responses[CommandReturnMaterial]),
             responses);
     }
+
+    public async Task<BlePrinterStatus> ReadStatusAsync(CancellationToken cancellationToken = default) =>
+        BlePrinterStatus.Parse(await SendCommandAsync(CommandInquiryStatus, cancellationToken: cancellationToken));
+
+    public async Task<BleMaterialReport> ReadMaterialAsync(CancellationToken cancellationToken = default) =>
+        BleMaterialReport.Parse(await SendCommandAsync(CommandReturnMaterial, cancellationToken: cancellationToken));
 
     public async Task PrintAsync(SupvanPrintData data, IProgress<string>? progress, CancellationToken cancellationToken)
     {
@@ -645,6 +687,14 @@ public sealed class BleProtocol : IAsyncDisposable
         }
     }
 
+    private void OnSessionStatusChanged(GattSession _, GattSessionStatusChangedEventArgs args)
+    {
+        if (!_disposed && args.Status == GattSessionStatus.Closed)
+        {
+            ConnectionLost?.Invoke(this, EventArgs.Empty);
+        }
+    }
+
     private static void EnsureSuccess(GattCommunicationStatus status, byte? protocolError, string operation)
     {
         if (status != GattCommunicationStatus.Success)
@@ -662,6 +712,7 @@ public sealed class BleProtocol : IAsyncDisposable
 
         _disposed = true;
         _notifyCharacteristic.ValueChanged -= OnValueChanged;
+        _session.SessionStatusChanged -= OnSessionStatusChanged;
         try
         {
             await _notifyCharacteristic.WriteClientCharacteristicConfigurationDescriptorAsync(
